@@ -1,0 +1,9 @@
+# Copy this file to terraform.tfvars and fill in your own values.
+# terraform.tfvars is gitignored because it can contain account-specific
+# values you may not want in version control.
+
+aws_account_id = "123456789012"
+
+# Optional overrides (defaults shown):
+# aws_region      = "us-east-1"
+# lock_table_name = "railhead-tfstate-lock"
