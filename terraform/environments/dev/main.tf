@@ -20,6 +20,14 @@ module "ecr" {
   repository_names = ["railhead-app"]
 }
 
+module "eks" {
+  source = "../../modules/eks"
+
+  cluster_name       = "railhead-dev"
+  kubernetes_version = "1.34"
+  subnet_ids         = module.vpc.private_subnet_ids
+}
+
 # ecr:GetAuthorizationToken authenticates to the ECR registry itself
 # (it's how the docker/aws CLI gets a login token before any specific
 # repository is even known), not to a single repository, so AWS does not
