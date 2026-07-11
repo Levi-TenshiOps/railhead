@@ -33,10 +33,29 @@ This project is built and torn down incrementally rather than left running conti
 
 Reproducibility evidence — `terraform apply`/`destroy` output and AWS Console views — organized by component. Each group shows that piece's full lifecycle: provisioned, verified, and (where applicable) torn down cleanly.
 
-- `screenshots/vpc-apply.png` — VPC module terraform apply output
-- `screenshots/vpc-console.png` — VPC resource map (subnets, route tables, NAT Gateway) in the AWS Console
-- `screenshots/vpc-destroy.png` — VPC module terraform destroy output *(added after tonight's teardown)*
-- `screenshots/iam-apply.png` — IAM/OIDC module terraform apply output
-- `screenshots/iam-trust-policy.png` — GitHub Actions IAM role's Trust relationships tab, showing the OIDC condition
-- `screenshots/ecr-apply.png` — ECR module terraform apply output
-- `screenshots/ecr-repository.png` — ECR repository settings (immutable tags, scan-on-push)
+**VPC**
+
+VPC module terraform apply output:
+![VPC module terraform apply output](screenshots/vpc-apply.png)
+
+VPC resource map (subnets, route tables, NAT Gateway) in the AWS Console:
+![VPC resource map in the AWS Console](screenshots/vpc-console.png)
+
+VPC module terraform destroy output:
+![VPC module terraform destroy output](screenshots/vpc-destroy.png)
+
+**IAM / OIDC**
+
+IAM/OIDC module terraform apply output:
+![IAM/OIDC module terraform apply output](screenshots/iam-apply.png)
+
+GitHub Actions IAM role's Trust relationships tab, showing the OIDC condition:
+![IAM role trust relationship showing the OIDC condition](screenshots/iam-trust-policy.png)
+
+**ECR**
+
+ECR module terraform apply output:
+![ECR module terraform apply output](screenshots/ecr-apply.png)
+
+ECR repository settings (immutable tags, scan-on-push):
+![ECR repository settings](screenshots/ecr-repository.png)
