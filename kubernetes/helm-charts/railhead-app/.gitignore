@@ -1,0 +1,4 @@
+# Downloaded dependency chart archives — regenerable via `helm dependency
+# update`. Chart.lock is committed since it pins the exact version/digest
+# for reproducibility (same philosophy as .terraform.lock.hcl).
+charts/
