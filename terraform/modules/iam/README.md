@@ -6,4 +6,4 @@ Sets up keyless CI/CD authentication for GitHub Actions using OIDC federation in
 
 **Outputs:** `github_actions_role_arn`, `github_actions_role_name`.
 
-**Note:** the trust policy currently allows any branch/PR/tag from the repo (`repo:<org>/<repo>:*`) to assume the role — intentionally left open until a CI workflow exists to test against, then meant to be tightened to `main` only.
+**Note:** the trust policy is scoped to `repo:<org>/<repo>:ref:refs/heads/main` — only GitHub Actions runs on `main` can assume the role. This was tightened from an initial wide-open `repo:<org>/<repo>:*` (any branch/PR/tag) once the real CI workflow (`.github/workflows/ci.yml`) existed to test it against.
