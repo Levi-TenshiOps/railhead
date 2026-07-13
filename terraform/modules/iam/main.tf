@@ -23,11 +23,11 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
   thumbprint_list = [data.tls_certificate.github_actions.certificates[0].sha1_fingerprint]
 }
 
-# Trust policy: only GitHub Actions runs from this repo (any branch,
-# tag, or PR) can assume this role. Once the CI workflow exists, tighten
-# the "sub" condition to a specific ref, e.g.
-# "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main", so
-# only pushes to main can deploy instead of every branch/PR.
+# Trust policy: only GitHub Actions runs on the main branch of this repo
+# can assume this role — tightened from an initial wide-open
+# "repo:<org>/<repo>:*" (any branch/tag/PR) now that a real CI workflow
+# exists to test against. PR runs never reach this trust condition at all
+# since ci.yml doesn't request credentials for pull_request events.
 data "aws_iam_policy_document" "github_actions_trust" {
   statement {
     effect  = "Allow"
@@ -47,7 +47,7 @@ data "aws_iam_policy_document" "github_actions_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_org}/${var.github_repo}:*"]
+      values   = ["repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main"]
     }
   }
 }

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-scan-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [api, worker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build -t railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }} ./app/${{ matrix.service }}
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      # Everything below only runs on pushes to main. Pull request runs never
+      # request AWS credentials at all, since build+scan needs none of them -
+      # this removes the entire class of risk where a crafted build step in
+      # a PR could exfiltrate cloud credentials, rather than relying on the
+      # push being blocked some other way.
+      - name: Configure AWS credentials
+        if: github.event_name == 'push'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::993268717190:role/railhead-github-actions-deploy
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        if: github.event_name == 'push'
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push image
+        if: github.event_name == 'push'
+        run: |
+          docker tag railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }} ${{ steps.ecr-login.outputs.registry }}/railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }}
+          docker push ${{ steps.ecr-login.outputs.registry }}/railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }}
