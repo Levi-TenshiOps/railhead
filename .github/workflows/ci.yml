@@ -28,7 +28,7 @@ jobs:
         run: docker build -t railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }} ./app/${{ matrix.service }}
 
       - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }}
           severity: HIGH,CRITICAL
