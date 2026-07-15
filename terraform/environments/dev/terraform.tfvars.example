@@ -1,0 +1,4 @@
+# Copy this file to terraform.tfvars and fill in your own values.
+# terraform.tfvars is gitignored since it holds a real credential.
+
+github_token = "github_pat_xxxxxxxxxxxxxxxxxxxxxx"

@@ -28,6 +28,15 @@ module "eks" {
   subnet_ids         = module.vpc.private_subnet_ids
 }
 
+module "argocd" {
+  source = "../../modules/argocd"
+
+  github_repo_url = "https://github.com/Levi-TenshiOps/railhead"
+  github_token    = var.github_token
+
+  depends_on = [module.eks]
+}
+
 # ecr:GetAuthorizationToken authenticates to the ECR registry itself
 # (it's how the docker/aws CLI gets a login token before any specific
 # repository is even known), not to a single repository, so AWS does not

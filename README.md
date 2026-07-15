@@ -15,13 +15,13 @@ Everything below exists and has been applied/verified against a live AWS account
 - **GitHub Actions OIDC federation** (`terraform/modules/iam`): keyless CI/CD authentication — GitHub Actions assumes a scoped IAM role via short-lived OIDC tokens instead of long-lived access keys sitting in GitHub Secrets.
 - **ECR** (`terraform/modules/ecr`): container image repositories with immutable tags (a pushed tag can never be silently overwritten) and vulnerability scan-on-push enabled, plus a lifecycle policy to keep image storage from growing unbounded.
 - **EKS** (`terraform/modules/eks`): a managed Kubernetes cluster — control plane plus a managed node group (2x t3.medium, on-demand) — using IAM Roles for Service Accounts (IRSA) for the VPC CNI and EBS CSI driver instead of broad node-level permissions, with core add-ons (vpc-cni, coredns, kube-proxy, aws-ebs-csi-driver) managed directly through Terraform.
-- **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a minimal FastAPI service (`railhead-api`) backed by Postgres (via the Bitnami Helm chart as a dependency, on a dedicated `gp3` EBS volume) and a worker process that exercises the API on a fixed interval, deployed manually via `helm install` — GitOps comes later. Honest note: on first install, the API pods briefly crash-loop while Postgres is still starting, since nothing yet waits explicitly for DB readiness; they self-recover within about a minute once Postgres is up. Observed and understood, not hidden — an `initContainer` that waits for Postgres is a natural fix, just not built yet.
+- **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a minimal FastAPI service (`railhead-api`) backed by Postgres (via the Bitnami Helm chart as a dependency, on a dedicated `gp3` EBS volume) and a worker process that exercises the API on a fixed interval. Honest note: on first install, the API pods briefly crash-loop while Postgres is still starting, since nothing yet waits explicitly for DB readiness; they self-recover within about a minute once Postgres is up. Observed and understood, not hidden — an `initContainer` that waits for Postgres is a natural fix, just not built yet.
+- **GitOps deployment** (`terraform/modules/argocd`): ArgoCD manages the sample app's deployment via a git-tracked `Application` resource pointed at this repo's Helm chart, with automated sync (`prune: true`, `selfHeal: true`) — no human runs `helm install`/`upgrade` anymore. The self-heal behavior is verified, not just configured: manually scaling the API deployment to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to the git-declared 2 replicas by ArgoCD in about a second, with zero human intervention.
 
 ### Planned, not yet built
 
 The following are designed but do not exist in this repo yet:
 
-- **GitOps deployment** (ArgoCD)
 - **Observability stack** (metrics/logs/tracing)
 - **Chaos engineering scenarios**
 - **Self-healing automation and scorecard**

@@ -3,3 +3,9 @@ variable "aws_region" {
   type        = string
   default     = "us-east-1"
 }
+
+variable "github_token" {
+  description = "Fine-grained GitHub PAT (read-only, repo-scoped) so ArgoCD can clone the private railhead repo"
+  type        = string
+  sensitive   = true
+}
