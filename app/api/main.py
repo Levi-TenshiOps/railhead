@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from psycopg2 import pool
 from pydantic import BaseModel
 
@@ -49,6 +50,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="railhead-api", lifespan=lifespan)
+
+# .instrument() attaches middleware that times/counts every request as it
+# flows through; .expose() adds the GET /metrics route Prometheus scrapes.
+# Defaults cover request count, a latency histogram, and an in-progress
+# gauge, labeled by method/path/status — enough to answer "how many
+# requests, how fast, how many failing" without hand-writing any of it.
+Instrumentator().instrument(app).expose(app)
 
 
 class Item(BaseModel):
