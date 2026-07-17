@@ -15,3 +15,9 @@ variable "github_token" {
   type        = string
   sensitive   = true
 }
+
+variable "kube_prometheus_stack_chart_version" {
+  description = "Version of the kube-prometheus-stack Helm chart to install"
+  type        = string
+  default     = "87.17.0"
+}

@@ -21,6 +21,12 @@ resource "kubernetes_namespace_v1" "railhead" {
   }
 }
 
+resource "kubernetes_namespace_v1" "monitoring" {
+  metadata {
+    name = "monitoring"
+  }
+}
+
 resource "helm_release" "argocd" {
   name       = "argocd"
   repository = "https://argoproj.github.io/argo-helm"
@@ -91,4 +97,166 @@ resource "kubernetes_manifest" "railhead_application" {
   }
 
   depends_on = [helm_release.argocd, kubernetes_secret_v1.repo_credentials]
+}
+
+# Deployed as its own ArgoCD Application rather than via Terraform's helm
+# provider, specifically because kube-prometheus-stack bundles its own CRDs
+# (ServiceMonitor, PrometheusRule, etc.). Installing those CRDs and any
+# instance of them in the same terraform apply hits the exact same
+# plan-time schema-validation problem the railhead Application did against
+# ArgoCD's own CRD — letting ArgoCD's sync engine own the whole install
+# sidesteps it entirely, since ArgoCD reconciles CRDs-then-resources
+# itself rather than needing Terraform to sequence it.
+#
+# Source is a Helm-chart-repo source (chart + targetRevision as the chart
+# version), not a git-repo source (path + branch) like the railhead
+# Application — ArgoCD supports both, and this is the chart-repo flavor.
+resource "kubernetes_manifest" "observability_application" {
+  manifest = {
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "observability"
+      namespace = kubernetes_namespace_v1.argocd.metadata[0].name
+    }
+    spec = {
+      project = "default"
+
+      source = {
+        repoURL        = "https://prometheus-community.github.io/helm-charts"
+        chart          = "kube-prometheus-stack"
+        targetRevision = var.kube_prometheus_stack_chart_version
+
+        helm = {
+          valuesObject = {
+            # CRD install is deliberately left to ArgoCD/Helm normally, but
+            # this chart's CRDs (Prometheus, Alertmanager, etc.) are large
+            # enough to hit Kubernetes' 256KiB total-annotation-size limit
+            # on client-side apply, and ArgoCD's ServerSideApply=true
+            # syncOption (the documented fix) did not resolve it in
+            # practice here even after a forced hard refresh. Verified
+            # `kubectl apply --server-side` on these exact CRD manifests
+            # DOES succeed at the Kubernetes API level, so the CRDs were
+            # bootstrapped once, manually, outside GitOps — crds.enabled
+            # tells the chart not to fight over them afterward. Everything
+            # else in this Application stays fully ArgoCD-managed.
+            crds = {
+              enabled = false
+            }
+
+            # Alertmanager is Week 6 territory (alerting), not needed yet.
+            alertmanager = {
+              enabled = false
+            }
+
+            # These control-plane components aren't scrapable on EKS (AWS
+            # manages them, no access to their metrics endpoints) — leaving
+            # them enabled would just create permanently-"down" targets in
+            # Prometheus with nothing actionable about them.
+            kubeControllerManager = { enabled = false }
+            kubeScheduler         = { enabled = false }
+            kubeEtcd              = { enabled = false }
+            kubeProxy             = { enabled = false }
+
+            prometheus = {
+              prometheusSpec = {
+                retention = "5d"
+
+                resources = {
+                  requests = { cpu = "100m", memory = "256Mi" }
+                  limits   = { cpu = "500m", memory = "512Mi" }
+                }
+              }
+
+              # Tells Prometheus to scrape the api's /metrics endpoint, via
+              # Helm values instead of a separate Terraform-managed
+              # ServiceMonitor CRD instance — same CRD-ordering reasoning
+              # as this whole Application being ArgoCD-managed. Sibling of
+              # prometheusSpec, not nested inside it — misplacing this one
+              # level too deep is a silent no-op, not an error.
+              additionalServiceMonitors = [
+                {
+                  name = "railhead-api"
+                  selector = {
+                    matchLabels = {
+                      app = "railhead-api"
+                    }
+                  }
+                  namespaceSelector = {
+                    matchNames = ["railhead"]
+                  }
+                  endpoints = [
+                    {
+                      port     = "http"
+                      path     = "/metrics"
+                      interval = "30s"
+                    }
+                  ]
+                }
+              ]
+            }
+
+            prometheusOperator = {
+              resources = {
+                requests = { cpu = "50m", memory = "64Mi" }
+                limits   = { cpu = "100m", memory = "128Mi" }
+              }
+            }
+
+            # Second real use of the EBS CSI driver besides Postgres —
+            # without persistence, custom dashboards would vanish on
+            # every Grafana pod restart.
+            grafana = {
+              persistence = {
+                enabled          = true
+                size             = "2Gi"
+                storageClassName = "gp3"
+              }
+
+              resources = {
+                requests = { cpu = "50m", memory = "128Mi" }
+                limits   = { cpu = "200m", memory = "256Mi" }
+              }
+            }
+
+            "kube-state-metrics" = {
+              resources = {
+                requests = { cpu = "20m", memory = "64Mi" }
+                limits   = { cpu = "100m", memory = "128Mi" }
+              }
+            }
+
+            "prometheus-node-exporter" = {
+              resources = {
+                requests = { cpu = "20m", memory = "32Mi" }
+                limits   = { cpu = "50m", memory = "64Mi" }
+              }
+            }
+          }
+        }
+      }
+
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+      }
+
+      # ServerSideApply is required here specifically because of this
+      # chart's CRDs (Prometheus, Alertmanager, etc.) — they're large
+      # enough that default client-side apply fails outright trying to
+      # stuff the whole manifest into the last-applied-configuration
+      # annotation, which hits Kubernetes' 256KiB total-annotation-size
+      # limit. Server-side apply tracks field ownership differently and
+      # doesn't need that annotation at all.
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = ["ServerSideApply=true"]
+      }
+    }
+  }
+
+  depends_on = [helm_release.argocd]
 }
