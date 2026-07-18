@@ -21,3 +21,25 @@ variable "kube_prometheus_stack_chart_version" {
   type        = string
   default     = "87.17.0"
 }
+
+variable "loki_chart_version" {
+  description = "Version of the Loki Helm chart to install"
+  type        = string
+  default     = "7.1.0"
+}
+
+variable "alloy_chart_version" {
+  description = "Version of the Grafana Alloy Helm chart to install"
+  type        = string
+  default     = "1.10.1"
+}
+
+variable "loki_bucket_name" {
+  description = "Name of the S3 bucket used for Loki chunk/index storage"
+  type        = string
+}
+
+variable "loki_irsa_role_arn" {
+  description = "ARN of the IRSA role Loki assumes to access its S3 bucket"
+  type        = string
+}

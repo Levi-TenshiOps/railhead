@@ -32,8 +32,10 @@ module "eks" {
 module "argocd" {
   source = "../../modules/argocd"
 
-  github_repo_url = "https://github.com/Levi-TenshiOps/railhead"
-  github_token    = var.github_token
+  github_repo_url    = "https://github.com/Levi-TenshiOps/railhead"
+  github_token       = var.github_token
+  loki_bucket_name   = module.iam.loki_chunks_bucket_name
+  loki_irsa_role_arn = module.eks.loki_irsa_role_arn
 
   depends_on = [module.eks]
 }

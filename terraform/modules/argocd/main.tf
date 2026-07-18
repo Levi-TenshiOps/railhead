@@ -342,3 +342,293 @@ resource "kubernetes_config_map_v1" "railhead_cluster_health_dashboard" {
     "railhead-cluster-health.json" = file("${path.module}/../../../kubernetes/observability/dashboards/cluster-health.json")
   }
 }
+
+# Loki in SingleBinary mode: all components (distributor, ingester,
+# querier, compactor, etc.) run in one process/pod instead of scaled-out
+# separately — the right tradeoff for this cluster's actual log volume.
+# Switching deploymentMode away from the chart's own default
+# (SimpleScalable) requires explicitly zeroing read/write/backend
+# replicas below; the chart does not do this automatically and a
+# combined-mode apply otherwise fails validation.
+resource "kubernetes_manifest" "loki_application" {
+  manifest = {
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "loki"
+      namespace = kubernetes_namespace_v1.argocd.metadata[0].name
+    }
+    spec = {
+      project = "default"
+
+      source = {
+        repoURL        = "https://grafana.github.io/helm-charts"
+        chart          = "loki"
+        targetRevision = var.loki_chart_version
+
+        helm = {
+          valuesObject = {
+            deploymentMode = "SingleBinary"
+
+            singleBinary = {
+              replicas = 1
+
+              persistence = {
+                enabled      = true
+                size         = "5Gi"
+                storageClass = "gp3"
+              }
+
+              resources = {
+                requests = { cpu = "100m", memory = "256Mi" }
+                limits   = { cpu = "500m", memory = "512Mi" }
+              }
+            }
+
+            # SimpleScalable-mode components — must be zeroed when running
+            # SingleBinary, since their defaults (3 replicas each) assume
+            # the other deployment mode.
+            read    = { replicas = 0 }
+            write   = { replicas = 0 }
+            backend = { replicas = 0 }
+
+            gateway = {
+              resources = {
+                requests = { cpu = "10m", memory = "32Mi" }
+                limits   = { cpu = "50m", memory = "64Mi" }
+              }
+            }
+
+            # No multi-tenancy needed for a single-app portfolio cluster.
+            # Optional caching/canary sidecars disabled to keep this lean
+            # on a 2x t3.medium cluster already running quite a lot.
+            # test.enabled must come down with lokiCanary: the chart's own
+            # validate.yaml refuses canary-less Helm test hooks, and ArgoCD
+            # doesn't invoke `helm test` in this GitOps setup anyway.
+            chunksCache  = { enabled = false }
+            resultsCache = { enabled = false }
+            lokiCanary   = { enabled = false }
+            test         = { enabled = false }
+
+            serviceAccount = {
+              annotations = {
+                "eks.amazonaws.com/role-arn" = var.loki_irsa_role_arn
+              }
+            }
+
+            loki = {
+              auth_enabled = false
+
+              limits_config = {
+                retention_period = "168h"
+              }
+
+              # Chart default (3) assumes a multi-replica ring; with a single
+              # singleBinary pod, the ingester refuses writes/reads once it
+              # can't find enough live replicas to satisfy the factor.
+              commonConfig = {
+                replication_factor = 1
+              }
+
+              storage = {
+                type = "s3"
+
+                bucketNames = {
+                  chunks = var.loki_bucket_name
+                  ruler  = var.loki_bucket_name
+                  admin  = var.loki_bucket_name
+                }
+
+                s3 = {
+                  region = "us-east-1"
+                }
+              }
+
+              # Required — no default. TSDB is the current recommended
+              # index type (boltdb-shipper is the older, now-legacy path).
+              schemaConfig = {
+                configs = [
+                  {
+                    from         = "2024-01-01"
+                    store        = "tsdb"
+                    object_store = "s3"
+                    schema       = "v13"
+                    index = {
+                      prefix = "loki_index_"
+                      period = "24h"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+      }
+
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = ["ServerSideApply=true"]
+      }
+    }
+  }
+
+  depends_on = [helm_release.argocd]
+}
+
+# Deployed as its own Application, not bundled with Loki — the Loki chart
+# has no Alloy dependency at all (checked its Chart.yaml directly: its
+# only dependencies are minio, grafana-agent-operator, and
+# rollout-operator). Alloy is Grafana's current, supported log shipper;
+# Promtail (the older choice) reached end-of-life in March 2026.
+resource "kubernetes_manifest" "alloy_application" {
+  manifest = {
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "alloy"
+      namespace = kubernetes_namespace_v1.argocd.metadata[0].name
+    }
+    spec = {
+      project = "default"
+
+      source = {
+        repoURL        = "https://grafana.github.io/helm-charts"
+        chart          = "alloy"
+        targetRevision = var.alloy_chart_version
+
+        helm = {
+          valuesObject = {
+            controller = {
+              type = "daemonset"
+            }
+
+            # This chart ships an empty ClusterRole by default — without
+            # these rules, Alloy's pods would run but silently collect
+            # nothing. `pods/log` (get) is what actually lets
+            # loki.source.kubernetes read log content via the kubelet
+            # API; the rest is what discovery.kubernetes needs to find
+            # targets in the first place.
+            rbac = {
+              create = true
+              clusterRules = [
+                {
+                  apiGroups = [""]
+                  resources = ["pods", "nodes", "nodes/proxy", "services", "endpoints"]
+                  verbs     = ["get", "list", "watch"]
+                },
+                {
+                  apiGroups = [""]
+                  resources = ["pods/log"]
+                  verbs     = ["get"]
+                }
+              ]
+            }
+
+            alloy = {
+              configMap = {
+                create  = true
+                content = <<-EOT
+                  discovery.kubernetes "pods" {
+                    role = "pod"
+                  }
+
+                  discovery.relabel "pods" {
+                    targets = discovery.kubernetes.pods.targets
+
+                    rule {
+                      source_labels = ["__meta_kubernetes_namespace"]
+                      target_label  = "namespace"
+                    }
+
+                    rule {
+                      source_labels = ["__meta_kubernetes_pod_name"]
+                      target_label  = "pod"
+                    }
+
+                    rule {
+                      source_labels = ["__meta_kubernetes_pod_container_name"]
+                      target_label  = "container"
+                    }
+                  }
+
+                  loki.source.kubernetes "pods" {
+                    targets    = discovery.relabel.pods.output
+                    forward_to = [loki.write.default.receiver]
+                  }
+
+                  loki.write "default" {
+                    endpoint {
+                      url = "http://loki-gateway.monitoring.svc.cluster.local/loki/api/v1/push"
+                    }
+                  }
+                EOT
+              }
+            }
+
+            resources = {
+              requests = { cpu = "50m", memory = "128Mi" }
+              limits   = { cpu = "200m", memory = "256Mi" }
+            }
+          }
+        }
+      }
+
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+      }
+
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = ["ServerSideApply=true"]
+      }
+    }
+  }
+
+  depends_on = [helm_release.argocd]
+}
+
+# Reuses the exact same sidecar-ConfigMap mechanism as the dashboard fix
+# earlier — same chart, same sidecar container, just watching a
+# different label (`grafana_datasource` instead of `grafana_dashboard`)
+# for a different content type (a datasource provisioning YAML instead
+# of a dashboard JSON).
+resource "kubernetes_config_map_v1" "loki_datasource" {
+  metadata {
+    name      = "loki-datasource"
+    namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+
+    labels = {
+      grafana_datasource = "1"
+    }
+  }
+
+  data = {
+    "loki-datasource.yaml" = yamlencode({
+      apiVersion = 1
+      datasources = [
+        {
+          name      = "Loki"
+          type      = "loki"
+          access    = "proxy"
+          url       = "http://loki-gateway.monitoring.svc.cluster.local"
+          isDefault = false
+          jsonData = {
+            maxLines = 1000
+          }
+        }
+      ]
+    })
+  }
+}
