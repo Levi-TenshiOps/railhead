@@ -239,9 +239,18 @@ resource "kubernetes_manifest" "observability_application" {
               }
             }
 
-            # Second real use of the EBS CSI driver besides Postgres —
-            # without persistence, custom dashboards would vanish on
-            # every Grafana pod restart.
+            # Second real use of the EBS CSI driver besides Postgres.
+            # Persistence alone isn't the real safety net for dashboards,
+            # though — a PVC can still get wiped by an incident (as
+            # happened once already). The kubernetes_config_map_v1
+            # resources below (see end of file) are the actual durable
+            # fix: dashboards defined as git-committed content, loaded via
+            # the chart's dashboard sidecar regardless of what happens to
+            # the PVC. Not using this chart's own `dashboards` values key
+            # for this — its own template labels the ConfigMap
+            # `dashboard-provider: default`, not `grafana_dashboard: "1"`,
+            # which is the label kube-prometheus-stack's sidecar actually
+            # watches for, so it silently never gets picked up.
             grafana = {
               persistence = {
                 enabled          = true
@@ -295,4 +304,41 @@ resource "kubernetes_manifest" "observability_application" {
   }
 
   depends_on = [helm_release.argocd]
+}
+
+# Dashboards-as-code: these two ConfigMaps are the actual durable fix for
+# the dashboard-loss incident. Labeled to match exactly what
+# kube-prometheus-stack's Grafana sidecar already watches for (confirmed
+# against the working built-in dashboards) — the chart's own
+# `grafana.dashboards` values key labels its generated ConfigMap
+# differently and is silently never picked up, which is why these are
+# managed directly here instead.
+resource "kubernetes_config_map_v1" "railhead_api_metrics_dashboard" {
+  metadata {
+    name      = "railhead-api-metrics-dashboard"
+    namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+
+    labels = {
+      grafana_dashboard = "1"
+    }
+  }
+
+  data = {
+    "railhead-api-metrics.json" = file("${path.module}/../../../kubernetes/observability/dashboards/api-metrics.json")
+  }
+}
+
+resource "kubernetes_config_map_v1" "railhead_cluster_health_dashboard" {
+  metadata {
+    name      = "railhead-cluster-health-dashboard"
+    namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+
+    labels = {
+      grafana_dashboard = "1"
+    }
+  }
+
+  data = {
+    "railhead-cluster-health.json" = file("${path.module}/../../../kubernetes/observability/dashboards/cluster-health.json")
+  }
 }
