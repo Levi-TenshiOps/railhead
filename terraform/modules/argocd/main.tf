@@ -33,6 +33,42 @@ resource "helm_release" "argocd" {
   chart      = "argo-cd"
   version    = var.argocd_chart_version
   namespace  = kubernetes_namespace_v1.argocd.metadata[0].name
+
+  # ArgoCD's generic default health check (used for any CRD without a
+  # specific customization) looks for a `type: Ready` status condition.
+  # The Prometheus Operator's Prometheus CRD reports `Available`/
+  # `Reconciled` conditions instead, so without this customization ArgoCD
+  # perpetually shows a fully healthy Prometheus as "Progressing" — a
+  # known, documented gap between ArgoCD's built-in health checks and
+  # Prometheus-Operator CRDs, not something wrong with the stack itself.
+  values = [<<-YAML
+    configs:
+      cm:
+        resource.customizations.health.monitoring.coreos.com_Prometheus: |
+          hs = {}
+          if obj.status ~= nil then
+            if obj.status.conditions ~= nil then
+              numTrue = 0
+              for i, condition in ipairs(obj.status.conditions) do
+                if condition.type == "Available" and condition.status == "True" then
+                  numTrue = numTrue + 1
+                end
+                if condition.type == "Reconciled" and condition.status == "True" then
+                  numTrue = numTrue + 1
+                end
+              end
+              if numTrue == 2 then
+                hs.status = "Healthy"
+                hs.message = "Prometheus is available and reconciled"
+                return hs
+              end
+            end
+          end
+          hs.status = "Progressing"
+          hs.message = "Waiting for Prometheus to become available and reconciled"
+          return hs
+    YAML
+  ]
 }
 
 # ArgoCD auto-discovers repo credentials from any Secret in its namespace
