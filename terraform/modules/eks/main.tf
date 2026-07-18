@@ -230,6 +230,66 @@ resource "aws_iam_role_policy_attachment" "ebs_csi_irsa" {
 }
 
 # ---------------------------------------------------------------------------
+# IRSA: Loki role — scoped to monitoring:loki (the Loki chart's default
+# ServiceAccount name/namespace), and to just the one bucket it needs.
+# Unlike the CNI/EBS-CSI roles above (which use an AWS-managed policy),
+# this one is a custom least-privilege policy since there's no AWS-managed
+# policy for "read/write objects in exactly this bucket".
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "loki_irsa_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.cluster.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.cluster.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:monitoring:loki"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.cluster.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "loki_irsa" {
+  name               = "${var.cluster_name}-loki-irsa"
+  assume_role_policy = data.aws_iam_policy_document.loki_irsa_assume.json
+}
+
+data "aws_iam_policy_document" "loki_bucket_access" {
+  statement {
+    sid    = "LokiBucketAccess"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      var.loki_bucket_arn,
+      "${var.loki_bucket_arn}/*",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "loki_irsa" {
+  name   = "loki-s3-access"
+  role   = aws_iam_role.loki_irsa.id
+  policy = data.aws_iam_policy_document.loki_bucket_access.json
+}
+
+# ---------------------------------------------------------------------------
 # EKS managed add-ons. Depend on the node group so their pods have somewhere
 # to schedule — creating them before any nodes exist just leaves them
 # waiting/unhealthy until compute shows up.

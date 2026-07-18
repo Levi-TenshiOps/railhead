@@ -14,3 +14,8 @@ variable "subnet_ids" {
   description = "Subnet IDs for the EKS control plane and node group (private subnets)"
   type        = list(string)
 }
+
+variable "loki_bucket_arn" {
+  description = "ARN of the S3 bucket used for Loki chunk/index storage (from the iam module)"
+  type        = string
+}

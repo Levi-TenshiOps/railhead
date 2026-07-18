@@ -26,6 +26,7 @@ module "eks" {
   cluster_name       = "railhead-dev"
   kubernetes_version = "1.34"
   subnet_ids         = module.vpc.private_subnet_ids
+  loki_bucket_arn    = module.iam.loki_chunks_bucket_arn
 }
 
 module "argocd" {

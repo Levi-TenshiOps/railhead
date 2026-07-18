@@ -17,3 +17,8 @@ output "oidc_provider_arn" {
   description = "ARN of this cluster's own OIDC provider (for IRSA roles)"
   value       = aws_iam_openid_connect_provider.cluster.arn
 }
+
+output "loki_irsa_role_arn" {
+  description = "ARN of the IRSA role Loki assumes to access its S3 bucket"
+  value       = aws_iam_role.loki_irsa.arn
+}

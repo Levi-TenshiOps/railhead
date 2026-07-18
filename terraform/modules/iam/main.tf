@@ -93,3 +93,33 @@ resource "aws_iam_role_policy" "terraform_state_access" {
   role   = aws_iam_role.github_actions_deploy.id
   policy = data.aws_iam_policy_document.terraform_state_access.json
 }
+
+data "aws_caller_identity" "current" {}
+
+# Loki's chunk/index storage. Unlike the Terraform state bucket, this one
+# is genuinely disposable — force_destroy is intentional here, since log
+# data losing prevent_destroy protection is the correct choice (nothing
+# else in this project depends on old logs surviving a bucket teardown).
+resource "aws_s3_bucket" "loki_chunks" {
+  bucket        = "railhead-loki-chunks-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "loki_chunks" {
+  bucket = aws_s3_bucket.loki_chunks.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "loki_chunks" {
+  bucket = aws_s3_bucket.loki_chunks.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
