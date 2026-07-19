@@ -21,13 +21,30 @@ Everything below exists and has been applied/verified against a live AWS account
 - **Observability — metrics** (`terraform/modules/argocd`, kube-prometheus-stack): Prometheus + Grafana, deployed as its own ArgoCD `Application` alongside the app. `railhead-api` is instrumented with `prometheus-fastapi-instrumentator`, exposing a `/metrics` endpoint scraped via a dedicated ServiceMonitor. Dashboards are provisioned as code — JSON committed to this repo, loaded into labeled ConfigMaps, and auto-discovered by Grafana's sidecar — so a Grafana PVC wipe doesn't lose them; they're re-provisioned automatically on next start.
 - **Observability — logs** (`terraform/modules/argocd`, Loki + Grafana Alloy): Loki (SingleBinary mode, S3-backed chunk storage, 7-day retention) aggregates logs cluster-wide, shipped by Grafana Alloy running as a DaemonSet. Alloy was chosen over the older Promtail specifically because Promtail reached end-of-life in March 2026 and is no longer maintained. Grafana picks up Loki as a datasource through the same sidecar-ConfigMap mechanism used for dashboards, just watching a `grafana_datasource` label instead of `grafana_dashboard`.
 
-### Planned, not yet built
+## Roadmap
 
-The following are designed but do not exist in this repo yet:
+### Week 6 — SLOs, Alerting, and Auto-Remediation (next up)
+- Define 2-3 real SLOs for the api (e.g. latency, error rate)
+- Enable Alertmanager (currently disabled in the observability Application's values, deliberately deferred until now)
+- Slack webhook integration for alert notifications
+- Error-budget-burn-rate based alerting rules (PrometheusRule CRD)
+- A written runbook for what a human does when an alert fires
+- An automated remediation script: Alertmanager webhook -> Python -> attempts a fix (restart/scale/cordon) -> escalates to a human if it can't resolve the issue itself
 
-- **Distributed tracing**
-- **Chaos engineering scenarios**
-- **Self-healing automation and scorecard**
+### Week 7 — Chaos Engineering
+- Chaos Mesh for orchestrating experiments
+- Chaos scenarios modeled on real production incidents diagnosed at Dell (storage latency, DNS misconfiguration, cert expiry, disk pressure/RAID, NTP/clock drift) — not generic random pod-killing
+- A self-healing scorecard: for each injected failure, record whether it self-healed automatically, was caught by Week 6's auto-remediation, or needed a human
+- Written postmortems for each simulated incident
+- Optional, revisit at the time: a small downstream service the api calls (tests graceful degradation vs. cascading failure), which would also be the point where distributed tracing finally has something real to show
+
+### Week 8 — Polish, Security/Cost Pass, and Demo
+- Security pass: network policies, IAM least-privilege review, secrets hygiene
+- Cost pass: right-sizing, revisit Spot instances for nodes
+- Decide whether to make the repo public
+- Decide how to deliberately use remaining AWS credits on something higher-value (candidates already on record: temporary production-scale demo config, EFK built alongside Loki as a comparison, Karpenter, or a multi-region DR simulation stretch)
+- Final README pass, architecture diagram, clean commit history
+- Demo video
 
 ## Cost approach
 
