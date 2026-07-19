@@ -22,12 +22,23 @@ Concretely:
 
 ## How to calibrate explanations
 
-- I hold AWS Certified CloudOps Engineer - Associate, but practical
-  recall is rusty. Explain AWS concepts as refreshers tied to the
-  exam, not first-time introductions.
-- Git and Terraform are genuinely new to me — explain from scratch.
-- My background is infra/ops, not app development — keep
-  Python/app-code explanations light unless I ask for more.
+- I hold both AWS Certified CloudOps Engineer - Associate and AWS
+  Certified Solutions Architect - Professional. I have a strong AWS
+  theory background — I'm not a beginner here. Explain concepts as a
+  thorough review to keep them sharp and practical, not as first-time
+  introductions.
+- I hold HashiCorp Certified: Terraform Associate (003) — I'm not new
+  to Terraform. Review concepts to keep them fresh rather than
+  explaining from scratch, but still walk me through new
+  commands/patterns as they come up.
+- Git: I've used it before on personal projects, never professionally.
+  I have add/commit/push solid now. Explain any new command or
+  concept as it comes up, so I keep building real fluency, not just
+  copying commands.
+- Python: I want to learn as much as possible. I haven't used it in a
+  while, so treat this as an active refresher, not a background skill
+  to gloss over — give real depth here, not light-touch explanations,
+  unless I say otherwise.
 
 ## Standing operational habits
 
