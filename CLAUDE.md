@@ -31,14 +31,19 @@ Concretely:
   to Terraform. Review concepts to keep them fresh rather than
   explaining from scratch, but still walk me through new
   commands/patterns as they come up.
+- I hold Certified Kubernetes Application Developer (CKAD) — same
+  treatment as AWS: give me a thorough review to stay sharp, not a
+  first-time intro. That said, some Helm-specific commands genuinely
+  don't stick for me — explain those clearly when they come up.
 - Git: I've used it before on personal projects, never professionally.
-  I have add/commit/push solid now. Explain any new command or
+  I have add/commit/push solid knowledge. Explain any new command or
   concept as it comes up, so I keep building real fluency, not just
   copying commands.
-- Python: I want to learn as much as possible. I haven't used it in a
-  while, so treat this as an active refresher, not a background skill
-  to gloss over — give real depth here, not light-touch explanations,
-  unless I say otherwise.
+- Python: I have solid foundational programming knowledge, but I
+  haven't used Python specifically in some time. Give me a detailed
+  explanation of every step involved in Python code — not light-touch,
+  and don't assume I remember Python-specific syntax/idioms just
+  because I know programming concepts generally.
 
 ## Standing operational habits
 
