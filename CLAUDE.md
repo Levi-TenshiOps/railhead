@@ -51,8 +51,25 @@ Concretely:
   session. Use targeted destroys (-target=module.eks
   -target=module.vpc) — dev was deliberately NOT split into
   foundation/workload layers; this is the agreed approach.
-- If Postgres/PVCs are deployed, always `helm uninstall railhead`
-  BEFORE `terraform destroy`, so the EBS volume releases cleanly.
+- ArgoCD manages all workloads now, so nothing gets a plain `helm
+  uninstall` anymore. Before `terraform destroy`, delete the ArgoCD
+  Application CRs first (`kubectl delete application <name> -n
+  argocd` for railhead, observability, loki, alloy — whichever are
+  deployed) so selfHeal can't fight the cleanup, then verify via
+  `kubectl get pods -A` and `kubectl get pvc -A` that everything
+  and every PVC is actually gone before destroying eks/vpc.
+- If deleting an Application CR doesn't cascade-delete its
+  workloads (no finalizer configured on that particular resource),
+  delete the underlying namespace directly instead — don't leave
+  orphaned pods/PVCs running untracked by ArgoCD.
+- Destroy module.vpc and module.eks together in the same command,
+  not sequentially. This cluster's EKS endpoint is public-only
+  (`endpoint_private_access = false`), so node-to-control-plane
+  traffic actually routes out through the NAT Gateway and back in
+  via the public endpoint. Destroying the NAT Gateway before the
+  node group breaks that path, drops nodes to NotReady, and can hang
+  any Kubernetes-API-dependent resource deletion (e.g. a namespace
+  finalizer waiting to confirm pods are gone).
 - Always show terraform plan output and wait for explicit
   go-ahead before apply/destroy.
 - Verify every apply/destroy independently via AWS CLI, not just
