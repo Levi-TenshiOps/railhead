@@ -1,6 +1,8 @@
+> **Status:** Actively in development — Weeks 1-5 of 8 complete (infrastructure, CI/CD, GitOps, observability with metrics and logging). Currently building: SLO-based alerting and auto-remediation (Week 6), chaos engineering (Week 7).
+
 # Railhead — Production-Grade SRE Platform on AWS
 
-Railhead is an end-to-end reliability engineering platform: infrastructure as code → deployment → observability → self-healing → human escalation, built and operated on AWS. It exists to demonstrate the full lifecycle a production SRE actually owns, not just a single layer of it. The differentiator is the chaos engineering component — failure scenarios modeled directly on real production incidents I've diagnosed running Dell VxRail/vSAN clusters (storage layer degradation, node isolation, resync storms), rather than generic random-pod-killing — paired with a self-healing scorecard that measures what percentage of injected failures resolve automatically versus require human escalation.
+This project demonstrates the full reliability engineering lifecycle: infrastructure as code, GitOps deployment, and observability — all complete and verified below (Weeks 1-5). The project's core differentiator, currently in active development (Weeks 6-7): chaos engineering scenarios modeled on real production failures I've diagnosed at Dell (VxRail/vSAN), paired with a self-healing scorecard quantifying what resolves automatically versus what needs a human. See the Roadmap section for current status.
 
 ## Why "Railhead"
 
@@ -24,24 +26,24 @@ Everything below exists and has been applied/verified against a live AWS account
 ## Roadmap
 
 ### Week 6 — SLOs, Alerting, and Auto-Remediation (next up)
-- Define 2-3 real SLOs for the api (e.g. latency, error rate)
+- Define 2-3 real SLOs for the API (e.g. latency, error rate)
 - Enable Alertmanager (currently disabled in the observability Application's values, deliberately deferred until now)
 - Slack webhook integration for alert notifications
 - Error-budget-burn-rate based alerting rules (PrometheusRule CRD)
 - A written runbook for what a human does when an alert fires
-- An automated remediation script: Alertmanager webhook -> Python -> attempts a fix (restart/scale/cordon) -> escalates to a human if it can't resolve the issue itself
+- An automated remediation script: Alertmanager webhook → Python → attempts a fix (restart/scale/cordon) → escalates to a human if it can't resolve the issue itself
 
 ### Week 7 — Chaos Engineering
 - Chaos Mesh for orchestrating experiments
 - Chaos scenarios modeled on real production incidents diagnosed at Dell (storage latency, DNS misconfiguration, cert expiry, disk pressure/RAID, NTP/clock drift) — not generic random pod-killing
 - A self-healing scorecard: for each injected failure, record whether it self-healed automatically, was caught by Week 6's auto-remediation, or needed a human
 - Written postmortems for each simulated incident
-- Optional, revisit at the time: a small downstream service the api calls (tests graceful degradation vs. cascading failure), which would also be the point where distributed tracing finally has something real to show
+- Optional, revisit at the time: a small downstream service the API calls (tests graceful degradation vs. cascading failure), which would also be the point where distributed tracing finally has something real to show
 
 ### Week 8 — Polish, Security/Cost Pass, and Demo
 - Security pass: network policies, IAM least-privilege review, secrets hygiene
 - Cost pass: right-sizing, revisit Spot instances for nodes
-- Decide whether to make the repo public
+- Repo made public at Week 5, ahead of the original Week 8 plan, to support active SRE job applications.
 - Decide how to deliberately use remaining AWS credits on something higher-value (candidates already on record: temporary production-scale demo config, EFK built alongside Loki as a comparison, Karpenter, or a multi-region DR simulation stretch)
 - Final README pass, architecture diagram, clean commit history
 - Demo video
@@ -128,4 +130,4 @@ Dashboard-persistence proof, part 2: both custom dashboards still present — re
 **Observability — logs**
 
 Grafana Explore, Loki datasource, a live LogQL query pulling real `railhead-api` log lines shipped end-to-end through Alloy → Loki → Grafana:
-![Grafana Explore showing live Loki logs from the api pods](screenshots/grafana-loki-explore.png)
+![Grafana Explore showing live Loki logs from the API pods](screenshots/grafana-loki-explore.png)
