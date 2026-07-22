@@ -1,8 +1,8 @@
-> **Status:** Actively in development — Weeks 1-5 of 8 complete (infrastructure, CI/CD, GitOps, observability with metrics and logging). Currently building: SLO-based alerting and auto-remediation (Week 6), chaos engineering (Week 7).
+> **Status:** Actively in development — Weeks 1-6 of 8 in progress. Infrastructure, CI/CD, GitOps, observability (metrics, logs, and SLO-based alerting) are complete. Currently building: automated remediation (rest of Week 6), chaos engineering (Week 7).
 
 # Railhead — Production-Grade SRE Platform on AWS
 
-This project demonstrates the full reliability engineering lifecycle: infrastructure as code, GitOps deployment, and observability — all complete and verified below (Weeks 1-5). The project's core differentiator, currently in active development (Weeks 6-7): chaos engineering scenarios modeled on real production failures I've diagnosed at Dell (VxRail/vSAN), paired with a self-healing scorecard quantifying what resolves automatically versus what needs a human. See the Roadmap section for current status.
+This project demonstrates the full reliability engineering lifecycle: infrastructure as code, GitOps deployment, and observability — including metrics, logs, and SLO-based alerting — all complete and verified below. The project's core differentiator, currently in active development: automated remediation, followed by chaos engineering scenarios modeled on real production failures I've diagnosed at Dell (VxRail/vSAN), paired with a self-healing scorecard quantifying what resolves automatically versus what needs a human. See the Roadmap section for current status.
 
 ## Why "Railhead"
 
@@ -22,15 +22,15 @@ Everything below exists and has been applied/verified against a live AWS account
 - **GitOps deployment** (`terraform/modules/argocd`): ArgoCD manages the sample app's deployment via a git-tracked `Application` resource pointed at this repo's Helm chart, with automated sync (`prune: true`, `selfHeal: true`) — no human runs `helm install`/`upgrade` anymore. The self-heal behavior is verified, not just configured: manually scaling the API deployment to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to the git-declared 2 replicas by ArgoCD in about a second, with zero human intervention.
 - **Observability — metrics** (`terraform/modules/argocd`, kube-prometheus-stack): Prometheus + Grafana, deployed as its own ArgoCD `Application` alongside the app. `railhead-api` is instrumented with `prometheus-fastapi-instrumentator`, exposing a `/metrics` endpoint scraped via a dedicated ServiceMonitor. Dashboards are provisioned as code — JSON committed to this repo, loaded into labeled ConfigMaps, and auto-discovered by Grafana's sidecar — so a Grafana PVC wipe doesn't lose them; they're re-provisioned automatically on next start.
 - **Observability — logs** (`terraform/modules/argocd`, Loki + Grafana Alloy): Loki (SingleBinary mode, S3-backed chunk storage, 7-day retention) aggregates logs cluster-wide, shipped by Grafana Alloy running as a DaemonSet. Alloy was chosen over the older Promtail specifically because Promtail reached end-of-life in March 2026 and is no longer maintained. Grafana picks up Loki as a datasource through the same sidecar-ConfigMap mechanism used for dashboards, just watching a `grafana_datasource` label instead of `grafana_dashboard`.
+- **Alerting** (`terraform/modules/argocd`, kube-prometheus-stack Alertmanager): two SLOs — 99% availability (5xx responses only; 4xx is deliberately excluded since a bad client request isn't a service failure) and 95% of requests under 300ms — each with the standard Google SRE Workbook multi-window multi-burn-rate pattern: fast-burn/critical (1h+5m windows, burn rate > 14.4) and slow-burn/warning (6h+30m windows, burn rate > 6). Defined via `additionalPrometheusRulesMap` in Helm values rather than a Terraform-managed `PrometheusRule` CRD instance, for the same CRD-ordering reason as the ServiceMonitor before it. Alertmanager routes both severities to a single Slack channel with an emoji/color visual distinction per severity. Verified end-to-end, not just configured: a real fast-burn alert was deliberately triggered (Postgres taken offline plus a burst of synthetic traffic against `/items`) and confirmed arriving in Slack. A written runbook (`docs/runbooks/api-high-error-rate.md`) covers what to check first and when to escalate versus self-resolve.
 
 ## Roadmap
 
-### Week 6 — SLOs, Alerting, and Auto-Remediation (next up)
-- Define 2-3 real SLOs for the API (e.g. latency, error rate)
-- Enable Alertmanager (currently disabled in the observability Application's values, deliberately deferred until now)
-- Slack webhook integration for alert notifications
-- Error-budget-burn-rate based alerting rules (PrometheusRule CRD)
-- A written runbook for what a human does when an alert fires
+### Week 6 — SLOs, Alerting, and Auto-Remediation
+
+**Session A — done:** 2 SLOs (99% availability, 95%-under-300ms latency) with multi-window multi-burn-rate alerting rules; Alertmanager enabled with Slack routing, visually distinct by severity; a written incident runbook. See Architecture above.
+
+**Session B — next up:**
 - An automated remediation script: Alertmanager webhook → Python → attempts a fix (restart/scale/cordon) → escalates to a human if it can't resolve the issue itself
 
 ### Week 7 — Chaos Engineering
@@ -131,3 +131,8 @@ Dashboard-persistence proof, part 2: both custom dashboards still present — re
 
 Grafana Explore, Loki datasource, a live LogQL query pulling real `railhead-api` log lines shipped end-to-end through Alloy → Loki → Grafana:
 ![Grafana Explore showing live Loki logs from the API pods](screenshots/grafana-loki-explore.png)
+
+**Alerting**
+
+Real burn-rate alerts arriving in Slack, critical (🔴) and warning (🟡) visually distinct — triggered by deliberately taking Postgres offline and generating a burst of failing requests, not simulated:
+![Slack messages showing critical and warning burn-rate alerts with distinct color/emoji](screenshots/slack-burnrate-alert.png)
