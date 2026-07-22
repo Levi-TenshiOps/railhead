@@ -56,7 +56,12 @@ app = FastAPI(title="railhead-api", lifespan=lifespan)
 # Defaults cover request count, a latency histogram, and an in-progress
 # gauge, labeled by method/path/status — enough to answer "how many
 # requests, how fast, how many failing" without hand-writing any of it.
-Instrumentator().instrument(app).expose(app)
+# latency_lowr_buckets is overridden to add an explicit 0.3s (300ms)
+# boundary: the library's own default buckets (0.1, 0.5, 1) have nothing
+# at 300ms, and a burn-rate SLO needs a real bucket boundary at its
+# threshold — histogram_quantile() can interpolate a percentile, but a
+# bucket-ratio burn-rate calculation can't interpolate an arbitrary cutoff.
+Instrumentator(latency_lowr_buckets=(0.1, 0.3, 0.5, 1)).instrument(app).expose(app)
 
 
 class Item(BaseModel):
