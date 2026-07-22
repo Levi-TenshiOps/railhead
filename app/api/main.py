@@ -4,6 +4,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_fastapi_instrumentator.metrics import default as default_metrics
 from psycopg2 import pool
 from pydantic import BaseModel
 
@@ -53,15 +54,17 @@ app = FastAPI(title="railhead-api", lifespan=lifespan)
 
 # .instrument() attaches middleware that times/counts every request as it
 # flows through; .expose() adds the GET /metrics route Prometheus scrapes.
-# Defaults cover request count, a latency histogram, and an in-progress
-# gauge, labeled by method/path/status — enough to answer "how many
-# requests, how fast, how many failing" without hand-writing any of it.
-# latency_lowr_buckets is overridden to add an explicit 0.3s (300ms)
-# boundary: the library's own default buckets (0.1, 0.5, 1) have nothing
-# at 300ms, and a burn-rate SLO needs a real bucket boundary at its
-# threshold — histogram_quantile() can interpolate a percentile, but a
+# Calling .instrument() with no prior .add() implicitly registers this same
+# default() metric bundle (request count, latency histograms, in-progress
+# gauge) with ITS OWN default buckets -- adding it explicitly here changes
+# nothing except the bucket boundaries. latency_lowr_buckets is overridden
+# to add a 0.3s (300ms) boundary: the library's own default (0.1, 0.5, 1)
+# has nothing at 300ms, and a burn-rate SLO needs a real bucket boundary at
+# its threshold -- histogram_quantile() can interpolate a percentile, but a
 # bucket-ratio burn-rate calculation can't interpolate an arbitrary cutoff.
-Instrumentator(latency_lowr_buckets=(0.1, 0.3, 0.5, 1)).instrument(app).expose(app)
+instrumentator = Instrumentator()
+instrumentator.add(default_metrics(latency_lowr_buckets=(0.1, 0.3, 0.5, 1)))
+instrumentator.instrument(app).expose(app)
 
 
 class Item(BaseModel):
