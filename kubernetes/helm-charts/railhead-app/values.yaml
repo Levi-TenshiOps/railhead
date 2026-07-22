@@ -30,6 +30,14 @@ postgresql:
   auth:
     username: railhead
     database: railhead
+    # Points at a Terraform-managed secret (terraform/modules/argocd) rather
+    # than letting this chart auto-generate its own password. ArgoCD
+    # re-renders this chart from scratch on every sync with no Helm release
+    # history to preserve a chart-generated password via `lookup` -- an
+    # in-chart-generated password can silently change underneath an
+    # already-initialized Postgres pod. This secret's value is written once
+    # by Terraform and never changes across ArgoCD syncs.
+    existingSecret: railhead-postgresql-auth
   primary:
     persistence:
       storageClass: gp3
