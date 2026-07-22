@@ -34,6 +34,7 @@ module "argocd" {
 
   github_repo_url    = "https://github.com/Levi-TenshiOps/railhead"
   github_token       = var.github_token
+  slack_webhook_url  = var.slack_webhook_url
   loki_bucket_name   = module.iam.loki_chunks_bucket_name
   loki_irsa_role_arn = module.eks.loki_irsa_role_arn
 

@@ -6,6 +6,9 @@ terraform {
     helm = {
       source = "hashicorp/helm"
     }
+    random = {
+      source = "hashicorp/random"
+    }
   }
 }
 
@@ -24,6 +27,39 @@ resource "kubernetes_namespace_v1" "railhead" {
 resource "kubernetes_namespace_v1" "monitoring" {
   metadata {
     name = "monitoring"
+  }
+}
+
+# The Bitnami postgresql chart auto-generates a random password on every
+# render when auth.existingSecret isn't set. ArgoCD re-renders this chart
+# from scratch on every sync (it has no Helm release history to preserve
+# the old value via `lookup`, unlike a real `helm upgrade`), so an
+# in-chart-generated password can silently change on any resync -- while
+# the already-initialized Postgres pod only ever recognizes whatever
+# password was in the secret at its own first boot. A Terraform-owned
+# secret stays stable across ArgoCD syncs, since Terraform only writes it
+# once and reuses the same state-tracked value forever after.
+resource "random_password" "postgres_admin" {
+  length  = 24
+  special = false
+}
+
+resource "random_password" "postgres_railhead_user" {
+  length  = 24
+  special = false
+}
+
+resource "kubernetes_secret_v1" "railhead_postgresql_auth" {
+  metadata {
+    name      = "railhead-postgresql-auth"
+    namespace = kubernetes_namespace_v1.railhead.metadata[0].name
+  }
+
+  # Key names match the chart's own default auth.secretKeys -- no need to
+  # override secretKeys in values.yaml as long as these match exactly.
+  data = {
+    "postgres-password" = random_password.postgres_admin.result
+    "password"          = random_password.postgres_railhead_user.result
   }
 }
 
@@ -135,6 +171,24 @@ resource "kubernetes_manifest" "railhead_application" {
   depends_on = [helm_release.argocd, kubernetes_secret_v1.repo_credentials]
 }
 
+# Mounted into the Alertmanager pod via alertmanagerSpec.secrets below, then
+# referenced by api_url_file rather than embedding the raw URL in api_url.
+# api_url would land in the Application's own spec.source.helm.valuesObject,
+# which is plaintext-readable via `kubectl get application observability -o
+# yaml` by anyone with basic read access to Applications; api_url_file keeps
+# the actual value inside this Secret instead, which has its own, tighter
+# RBAC surface.
+resource "kubernetes_secret_v1" "alertmanager_slack_webhook" {
+  metadata {
+    name      = "alertmanager-slack-webhook"
+    namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+  }
+
+  data = {
+    "webhook-url" = var.slack_webhook_url
+  }
+}
+
 # Deployed as its own ArgoCD Application rather than via Terraform's helm
 # provider, specifically because kube-prometheus-stack bundles its own CRDs
 # (ServiceMonitor, PrometheusRule, etc.). Installing those CRDs and any
@@ -180,9 +234,235 @@ resource "kubernetes_manifest" "observability_application" {
               enabled = false
             }
 
-            # Alertmanager is Week 6 territory (alerting), not needed yet.
+            # Alertmanager routing: everything except the chart's own
+            # built-in Watchdog alert (a permanently-firing heartbeat used
+            # to confirm the pipeline itself is alive, not a real problem)
+            # goes to the single Slack receiver below. severity=critical
+            # and severity=warning share one receiver/channel rather than
+            # two, since Step 3 asked for a single glance-able channel with
+            # visually distinct formatting per severity instead of separate
+            # channels.
             alertmanager = {
-              enabled = false
+              enabled = true
+
+              alertmanagerSpec = {
+                # Mounts kubernetes_secret_v1.alertmanager_slack_webhook at
+                # /etc/alertmanager/secrets/<secret-name>/<data-key> --
+                # referenced below via api_url_file instead of api_url.
+                secrets = [kubernetes_secret_v1.alertmanager_slack_webhook.metadata[0].name]
+
+                resources = {
+                  requests = { cpu = "10m", memory = "32Mi" }
+                  limits   = { cpu = "50m", memory = "64Mi" }
+                }
+              }
+
+              config = {
+                global = {
+                  resolve_timeout = "5m"
+                }
+
+                route = {
+                  group_by        = ["namespace", "alertname"]
+                  group_wait      = "30s"
+                  group_interval  = "5m"
+                  repeat_interval = "4h"
+                  receiver        = "null"
+
+                  routes = [
+                    {
+                      receiver = "null"
+                      matchers = ["alertname = \"Watchdog\""]
+                    },
+                    {
+                      receiver = "slack-notifications"
+                      matchers = ["severity =~ \"critical|warning\""]
+                    }
+                  ]
+                }
+
+                receivers = [
+                  { name = "null" },
+                  {
+                    name = "slack-notifications"
+                    slack_configs = [
+                      {
+                        api_url_file  = "/etc/alertmanager/secrets/alertmanager-slack-webhook/webhook-url"
+                        channel       = "#alerts"
+                        send_resolved = true
+                        # Go templates evaluated by Alertmanager itself at
+                        # notification time, not Terraform -- {{ }} has no
+                        # relation to Terraform's own ${} interpolation.
+                        # color sets Slack's message sidebar color; title
+                        # adds an emoji + label so critical vs warning is
+                        # readable at a glance without opening the message.
+                        title = "{{ if eq .CommonLabels.severity \"critical\" }}:red_circle: CRITICAL{{ else }}:large_yellow_circle: WARNING{{ end }}: {{ .CommonLabels.alertname }}"
+                        text  = "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
+                        color = "{{ if eq .CommonLabels.severity \"critical\" }}danger{{ else }}warning{{ end }}"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+
+            # Two SLOs, each with the standard Google SRE Workbook
+            # multi-window multi-burn-rate pattern: a fast-burn/critical
+            # rule (1h + 5m windows) and a slow-burn/warning rule (6h + 30m
+            # windows). Both windows in a rule must independently exceed
+            # the threshold (joined with `and`) -- the long window (1h/6h)
+            # confirms the burn is real and sustained rather than a single
+            # noisy scrape, while the short window (5m/30m) makes the alert
+            # clear quickly once the underlying problem actually stops,
+            # instead of staying "firing" for up to an hour purely because
+            # the long window still contains the old bad data.
+            #
+            # Burn rate threshold derivation: to page when X% of the error
+            # budget would be consumed in window W (out of a 30-day/720h
+            # SLO period), threshold = X / (W_hours / 720). Fast-burn wants
+            # 2% of budget in 1h -> 0.02 / (1/720) = 14.4. Slow-burn wants
+            # 5% of budget in 6h -> 0.05 / (6/720) = 6. Same two thresholds
+            # apply to both SLOs below; only the window sizes and the
+            # error-budget fraction (1 - SLO target) differ per SLO.
+            additionalPrometheusRulesMap = {
+              "railhead-api-slo-burn-rate" = {
+                groups = [
+                  {
+                    # Availability SLO: 99% of requests non-5xx over 30
+                    # days -> 1% error budget. "Bad event" = a 5xx response
+                    # specifically, not 4xx -- a 4xx means the client sent
+                    # a bad request, not that the service failed to serve a
+                    # valid one, so it's deliberately excluded from an
+                    # availability SLO (unlike the Grafana error-rate panel,
+                    # which intentionally shows 4xx+5xx together for
+                    # general debugging visibility).
+                    name = "railhead-api-availability-slo"
+                    rules = [
+                      {
+                        alert = "RailheadAPIAvailabilityBurnRateCritical"
+                        expr  = <<-EOT
+                          (
+                            sum(rate(http_requests_total{job="railhead-api", status=~"5xx"}[1h]))
+                            /
+                            sum(rate(http_requests_total{job="railhead-api"}[1h]))
+                          ) > (14.4 * 0.01)
+                          and
+                          (
+                            sum(rate(http_requests_total{job="railhead-api", status=~"5xx"}[5m]))
+                            /
+                            sum(rate(http_requests_total{job="railhead-api"}[5m]))
+                          ) > (14.4 * 0.01)
+                        EOT
+                        "for" = "2m"
+                        labels = {
+                          severity = "critical"
+                          slo      = "availability"
+                        }
+                        annotations = {
+                          summary     = "Railhead API burning error budget fast (availability SLO)"
+                          description = "5xx rate has exceeded 14.4x the sustainable rate for the 99% availability SLO, over both a 1h and 5m window. At this rate the entire 30-day error budget is exhausted in about 2 days."
+                        }
+                      },
+                      {
+                        alert = "RailheadAPIAvailabilityBurnRateWarning"
+                        expr  = <<-EOT
+                          (
+                            sum(rate(http_requests_total{job="railhead-api", status=~"5xx"}[6h]))
+                            /
+                            sum(rate(http_requests_total{job="railhead-api"}[6h]))
+                          ) > (6 * 0.01)
+                          and
+                          (
+                            sum(rate(http_requests_total{job="railhead-api", status=~"5xx"}[30m]))
+                            /
+                            sum(rate(http_requests_total{job="railhead-api"}[30m]))
+                          ) > (6 * 0.01)
+                        EOT
+                        "for" = "5m"
+                        labels = {
+                          severity = "warning"
+                          slo      = "availability"
+                        }
+                        annotations = {
+                          summary     = "Railhead API burning error budget (availability SLO)"
+                          description = "5xx rate has exceeded 6x the sustainable rate for the 99% availability SLO, over both a 6h and 30m window. At this rate the entire 30-day error budget is exhausted in about 5 days."
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    # Latency SLO: 95% of requests under 300ms over 30 days
+                    # -> 5% latency budget. "Bad event" fraction is
+                    # computed from the histogram directly: 1 minus (the
+                    # rate of requests landing in the le="0.3" bucket,
+                    # divided by the rate of all requests). This needs a
+                    # real bucket boundary at exactly 0.3 -- see
+                    # app/api/main.py, where latency_lowr_buckets was
+                    # extended specifically to add it.
+                    name = "railhead-api-latency-slo"
+                    rules = [
+                      {
+                        alert = "RailheadAPILatencyBurnRateCritical"
+                        expr  = <<-EOT
+                          (
+                            1 - (
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", le="0.3"}[1h]))
+                              /
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api"}[1h]))
+                            )
+                          ) > (14.4 * 0.05)
+                          and
+                          (
+                            1 - (
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", le="0.3"}[5m]))
+                              /
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api"}[5m]))
+                            )
+                          ) > (14.4 * 0.05)
+                        EOT
+                        "for" = "2m"
+                        labels = {
+                          severity = "critical"
+                          slo      = "latency"
+                        }
+                        annotations = {
+                          summary     = "Railhead API burning latency budget fast (latency SLO)"
+                          description = "The fraction of requests slower than 300ms has exceeded 14.4x the sustainable rate for the 95%-under-300ms SLO, over both a 1h and 5m window. At this rate the entire 30-day latency budget is exhausted in about 2 days."
+                        }
+                      },
+                      {
+                        alert = "RailheadAPILatencyBurnRateWarning"
+                        expr  = <<-EOT
+                          (
+                            1 - (
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", le="0.3"}[6h]))
+                              /
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api"}[6h]))
+                            )
+                          ) > (6 * 0.05)
+                          and
+                          (
+                            1 - (
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", le="0.3"}[30m]))
+                              /
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api"}[30m]))
+                            )
+                          ) > (6 * 0.05)
+                        EOT
+                        "for" = "5m"
+                        labels = {
+                          severity = "warning"
+                          slo      = "latency"
+                        }
+                        annotations = {
+                          summary     = "Railhead API burning latency budget (latency SLO)"
+                          description = "The fraction of requests slower than 300ms has exceeded 6x the sustainable rate for the 95%-under-300ms SLO, over both a 6h and 30m window. At this rate the entire 30-day latency budget is exhausted in about 5 days."
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
             }
 
             # These control-plane components aren't scrapable on EKS (AWS

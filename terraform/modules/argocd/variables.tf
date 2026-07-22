@@ -16,6 +16,12 @@ variable "github_token" {
   sensitive   = true
 }
 
+variable "slack_webhook_url" {
+  description = "Slack incoming webhook URL Alertmanager posts alert notifications to"
+  type        = string
+  sensitive   = true
+}
+
 variable "kube_prometheus_stack_chart_version" {
   description = "Version of the kube-prometheus-stack Helm chart to install"
   type        = string

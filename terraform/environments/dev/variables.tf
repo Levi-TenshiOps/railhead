@@ -9,3 +9,9 @@ variable "github_token" {
   type        = string
   sensitive   = true
 }
+
+variable "slack_webhook_url" {
+  description = "Slack incoming webhook URL Alertmanager posts alert notifications to"
+  type        = string
+  sensitive   = true
+}

@@ -1,4 +1,8 @@
 # Copy this file to terraform.tfvars and fill in your own values.
-# terraform.tfvars is gitignored since it holds a real credential.
+# terraform.tfvars is gitignored since it holds real credentials.
 
 github_token = "github_pat_xxxxxxxxxxxxxxxxxxxxxx"
+
+# Get this from Slack: create an Incoming Webhook app for your workspace,
+# pick a channel, and copy the URL it gives you.
+slack_webhook_url = "REPLACE_WITH_YOUR_SLACK_INCOMING_WEBHOOK_URL"
