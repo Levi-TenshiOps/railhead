@@ -2,9 +2,11 @@
 
 # Railhead — Production-Grade SRE Platform on AWS
 
-Railhead is a hands-on SRE platform I built on AWS to prove I can run the full lifecycle of a production service, not just talk about it. It provisions its own infrastructure, deploys itself, and watches itself — and, once the last two pieces land, will try to fix itself before paging a human.
+Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and now monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account, not just configured and left untested.
 
-Everything through observability and alerting is live and verified against a real AWS account. What's left is automated remediation, then chaos engineering: deliberately breaking things the way I've seen them break running production VxRail/vSAN at Dell, and measuring how much of that resolves on its own versus needs a person. Full status in the Roadmap below.
+Two pieces are still ahead. First, automated remediation: when an alert fires, a script attempts a fix on its own — restart, scale, cordon — and escalates to a human only if it can't resolve things itself. Second, chaos engineering: deliberately injecting the kinds of failures I've actually diagnosed running production VxRail/vSAN clusters at Dell — storage latency, DNS misconfiguration, cert expiry, disk pressure — and measuring how much of that the system catches on its own.
+
+Full status, what's built, and what's still in progress: see the Roadmap below.
 
 ## Why "Railhead"
 
