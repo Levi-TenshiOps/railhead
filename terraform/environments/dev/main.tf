@@ -17,7 +17,7 @@ module "iam" {
 module "ecr" {
   source = "../../modules/ecr"
 
-  repository_names = ["railhead-api", "railhead-worker"]
+  repository_names = ["railhead-api", "railhead-worker", "railhead-remediator"]
 }
 
 module "eks" {
