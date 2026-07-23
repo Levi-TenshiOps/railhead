@@ -171,6 +171,47 @@ resource "kubernetes_manifest" "railhead_application" {
   depends_on = [helm_release.argocd, kubernetes_secret_v1.repo_credentials]
 }
 
+# Same git-source pattern as railhead_application above, not the
+# Helm-chart-repo-source pattern used by observability/loki/alloy -- this
+# chart is our own code in our own repo (kubernetes/helm-charts/
+# railhead-remediator), not a third-party chart published to an external
+# Helm chart repository, so there's no external chart version to pin and
+# no need for a Terraform-injected valuesObject; its values.yaml lives in
+# the chart itself and is watched via git the same way railhead-app is.
+resource "kubernetes_manifest" "railhead_remediator_application" {
+  manifest = {
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "railhead-remediator"
+      namespace = kubernetes_namespace_v1.argocd.metadata[0].name
+    }
+    spec = {
+      project = "default"
+
+      source = {
+        repoURL        = var.github_repo_url
+        path           = "kubernetes/helm-charts/railhead-remediator"
+        targetRevision = "main"
+      }
+
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = kubernetes_namespace_v1.railhead.metadata[0].name
+      }
+
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+      }
+    }
+  }
+
+  depends_on = [helm_release.argocd, kubernetes_secret_v1.repo_credentials]
+}
+
 # Mounted into the Alertmanager pod via alertmanagerSpec.secrets below, then
 # referenced by api_url_file rather than embedding the raw URL in api_url.
 # api_url would land in the Application's own spec.source.helm.valuesObject,
@@ -299,6 +340,25 @@ resource "kubernetes_manifest" "observability_application" {
                         title = "{{ if eq .CommonLabels.severity \"critical\" }}:red_circle: CRITICAL{{ else }}:large_yellow_circle: WARNING{{ end }}: {{ .CommonLabels.alertname }}"
                         text  = "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
                         color = "{{ if eq .CommonLabels.severity \"critical\" }}danger{{ else }}warning{{ end }}"
+                      }
+                    ]
+
+                    # Additive to this SAME receiver, not a new route/receiver
+                    # filtered to just KubePodCrashLooping -- every critical/
+                    # warning alert reaches this webhook exactly like it
+                    # reaches Slack, but remediate.py's own
+                    # AUTO_REMEDIATE_ALERTS set is the single source of truth
+                    # for what actually gets acted on. Duplicating that
+                    # filter into Alertmanager's routing tree would mean two
+                    # places to update every time the auto-remediation scope
+                    # changes; keeping it in one place (the script) means
+                    # widening or narrowing what's auto-fixed is a one-line
+                    # Python change; the Slack path is completely unaffected
+                    # either way.
+                    webhook_configs = [
+                      {
+                        url           = "http://railhead-remediator.railhead.svc.cluster.local:8080/webhook"
+                        send_resolved = true
                       }
                     ]
                   }

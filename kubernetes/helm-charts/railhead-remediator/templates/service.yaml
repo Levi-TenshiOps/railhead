@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: railhead-remediator
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: railhead-remediator
+  ports:
+    - port: 8080
+      targetPort: 8080

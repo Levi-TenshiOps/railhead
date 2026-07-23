@@ -1,0 +1,15 @@
+image:
+  repository: 993268717190.dkr.ecr.us-east-1.amazonaws.com/railhead-remediator
+  tag: ca01438
+  pullPolicy: IfNotPresent
+namespace: railhead
+replicaCount: 1
+service:
+  port: 8080
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
