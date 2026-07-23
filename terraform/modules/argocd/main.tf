@@ -135,8 +135,8 @@ resource "kubernetes_secret_v1" "repo_credentials" {
 # running `helm install`, this tells ArgoCD to watch a path in a git repo
 # and continuously reconcile the cluster to match it. Depends on the Helm
 # release because the Application CRD only exists once ArgoCD itself is
-# installed — see the chat explanation on why this forces two applies the
-# first time around.
+# installed — see "Known gotchas" in this module's README for why that
+# forces a two-pass apply on a from-scratch deploy.
 resource "kubernetes_manifest" "railhead_application" {
   manifest = {
     apiVersion = "argoproj.io/v1alpha1"
