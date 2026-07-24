@@ -43,4 +43,18 @@ Only 5xx counts as "bad" here — 4xx (bad client requests) is deliberately excl
 - The critical alert has been firing for more than ~15 minutes with no clear cause identified — at the 14.4x burn rate, that's already a meaningful chunk of the monthly error budget gone.
 - Fixing it would require touching Terraform/infra (not just `kubectl`) — e.g. the EKS node group, IAM, or anything outside the `railhead` namespace.
 
-Automated first-response (attempt a fix — restart/scale/cordon — before escalating) is planned for Week 6 Session B, not built yet as of this runbook's writing. Until then, every fast-burn alert needs a human to look at it.
+Automated first-response now exists for one specific, narrower alert — see below. It does not cover the aggregate SLO burn-rate alerts this runbook is otherwise about; those still need a human every time, for the reasons in "Self-resolve vs. escalate" above.
+
+## Automated response: `RailheadAPIPodErrorRate` (pod quarantine)
+
+This is a different, more specific alert than the two above: it fires when **one** pod is serving majority 5xx while its Service siblings stay healthy — the corrupted-connection-pool failure mode, not a shared dependency outage. Unlike the aggregate burn-rate alerts, this one has an automated first response: `railhead-remediator` receives it via an Alertmanager webhook and quarantines the named pod on its own, no human needed for the common case.
+
+**What "quarantined" means:** the remediator patches the pod's `app` label to `railhead-api-quarantined`. That single label change drops the pod out of both the Service's selector (traffic stops immediately) and the ReplicaSet's selector (a healthy replacement is created immediately, restoring capacity) — full mechanism in the root README's "Automated remediation: pod quarantine" section.
+
+**What the Slack message means:** a `:hospital:` message naming the pod, with an evidence block (its recent logs, restart count, image) captured *before* the quarantine action, so you have the actual failure evidence even though the pod itself will be gone in an hour.
+
+**Reading the follow-up `resolved` alert:** once the pod is quarantined, it stops receiving traffic and Prometheus stops scraping it, so the per-pod error-rate series it was firing on simply disappears — Alertmanager reports this as the alert resolving. **A `resolved` notification here means the quarantine worked, not that the underlying problem fixed itself.** Don't read it as "safe to ignore" the way you would for a burn-rate alert that cleared because traffic actually recovered.
+
+**What happens to the quarantined pod:** it keeps running, untouched, for inspection — `kubectl logs`/`kubectl exec` still work against it by name. It's fully orphaned (the ReplicaSet releases its `ownerReference`), so nothing will ever garbage-collect it on its own. The remediator deletes it itself after a 60-minute TTL. If you need to inspect it, do so within that window.
+
+**When this still escalates to a human:** more than one pod alerting in the same Alertmanager payload (shared failure — quarantining can't help, every replacement would be equally broken), 3+ quarantines within 15 minutes (a bad deployment, not one bad pod), or quarantining would leave zero pods serving traffic. In all three cases the remediator posts a `:no_entry:` refusal to Slack and takes no action — treat that exactly like any other page.

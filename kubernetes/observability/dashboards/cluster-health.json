@@ -1,4 +1,4 @@
-﻿{
+{
     "annotations":  {
                         "list":  [
                                      {
@@ -461,7 +461,7 @@
                                              ]
                    },
     "timezone":  "browser",
-    "title":  "Railhead â€” Cluster Health",
+    "title":  "Railhead — Cluster Health",
     "uid":  "adpcr2n",
     "version":  1
 }

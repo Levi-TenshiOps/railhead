@@ -1,4 +1,4 @@
-﻿{
+{
     "annotations":  {
                         "list":  [
                                      {
@@ -357,7 +357,7 @@
                                              ]
                    },
     "timezone":  "browser",
-    "title":  "Railhead â€” API Metrics",
+    "title":  "Railhead — API Metrics",
     "uid":  "ads28jx",
     "version":  1
 }
