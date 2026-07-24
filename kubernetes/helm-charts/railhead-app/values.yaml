@@ -1,7 +1,7 @@
 api:
   image:
     repository: 993268717190.dkr.ecr.us-east-1.amazonaws.com/railhead-api
-    tag: "b2e37c9"
+    tag: "ab88f85"
   replicaCount: 2
   service:
     port: 80
