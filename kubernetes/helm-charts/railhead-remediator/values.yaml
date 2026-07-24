@@ -1,6 +1,6 @@
 image:
   repository: 993268717190.dkr.ecr.us-east-1.amazonaws.com/railhead-remediator
-  tag: ca01438
+  tag: b2e37c9
   pullPolicy: IfNotPresent
 namespace: railhead
 replicaCount: 1
