@@ -37,6 +37,106 @@ Everything below is live and verified against a real AWS account — nothing her
 **Session B — next up:**
 - An automated remediation script: Alertmanager webhook → Python → attempts a fix (restart/scale/cordon) → escalates to a human if it can't resolve the issue itself
 
+## Automated remediation: pod quarantine
+
+### Background
+
+`railhead-api` runs 2 replicas behind a single Service. During load testing we
+hit a state where the error rate sat at roughly 50% and stayed there. Both pods
+were `1/1 Running` and `Ready`. Restarting the deployment cleared it.
+
+The cause was one pod's connection pool, not the database.
+`psycopg2.pool.SimpleConnectionPool` is documented as not thread-safe, and
+FastAPI dispatches sync `def` routes through a threadpool. Under concurrency
+the pool's internal bookkeeping can be corrupted: connections are checked out
+and never recorded as returned, and once the in-use count reaches `maxconn`,
+every subsequent `getconn()` raises `PoolError` permanently.
+
+That pool lives in one pod's memory. The other pod was unaffected.
+
+### Why Kubernetes never noticed
+
+The readiness probe hits `/health`:
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+It returns a hardcoded value and never touches the database. Kubernetes asked
+"are you ok?", the pod said yes, and traffic kept being split 50/50.
+
+Kubernetes behaved correctly. The health check answers *"is the web server
+running?"* when the useful question is *"can you actually do your job?"*
+
+### Why a better probe isn't enough: it never restores capacity
+
+Making the readiness probe run `SELECT 1` would stop traffic to the broken pod.
+It would not replace it.
+
+A pod failing readiness is still `Running` and still matches the ReplicaSet's
+label selector. The ReplicaSet's contract is keeping N pods that *match its
+selector* — readiness plays no part in that count. So the count stays at 2, no
+replacement is created, and the service runs at half capacity indefinitely.
+
+Moving the check to the liveness probe doesn't help either: the container
+restarts, hits the same condition, and enters CrashLoopBackOff. You lose the
+pod for diagnosis and gain a backoff timer.
+
+**No probe configuration produces a healthy replacement.** Removing the pod
+from the ReplicaSet's *selector* does.
+
+### What the script does
+
+On a per-pod error-rate alert, it patches one label on the named pod:
+
+    app: railhead-api  ->  app: railhead-api-quarantined
+
+That label appears in two selectors, so one patch does two things:
+
+- the **Service** selector no longer matches — the pod leaves Endpoints and
+  traffic stops
+- the **ReplicaSet** selector no longer matches — the ReplicaSet releases the
+  pod and creates a replacement, restoring capacity
+
+The broken pod keeps running and is available for inspection. Kubernetes
+orphans it completely (the ReplicaSet strips its ownerReference), so nothing
+will ever garbage-collect it — the script deletes quarantined pods after a TTL.
+
+### Scope: this stops the bleeding, it does not cure the disease
+
+The script does not fix Postgres, the network, or the application. It stops
+users reaching the broken pod, restores capacity, preserves the pod for
+diagnosis, and reports what it did. The replacement pod helps only when the
+fault was pod-local — a corrupted pool, a node-level network issue.
+
+### Guards
+
+- **Minimum remaining ready** — never quarantine if it would leave no pod
+  serving traffic.
+- **Multi-pod detection** — if more than one pod is alerting in the same
+  Alertmanager payload, this is a shared failure and quarantining is useless
+  (every replacement would be equally broken). Refuse and escalate.
+- **Quarantine budget** — 3 quarantines in 15 minutes indicates a bad
+  deployment rather than one bad pod. Refuse and escalate.
+
+If Postgres itself goes down, all replicas fail together. The multi-pod guard
+usually catches this on the first payload; the budget guard is the backstop if
+alerts arrive separately.
+
+### Design decision: `/health` stays database-free
+
+Deliberate, not an oversight. A readiness probe that checks a shared dependency
+fails every replica simultaneously when that dependency dies, converting
+partial degradation into a total outage. Readiness should answer "can I
+serve?", not "is everything downstream healthy?".
+
+### Limitation
+
+Detection takes ~5 minutes end to end: scrape interval, 5m rate window,
+`for: 2m` hold, Alertmanager grouping delay. A service mesh with outlier
+detection would eject a bad endpoint in seconds — but would also destroy the
+evidence.
+
 ### Week 7 — Chaos Engineering
 - Chaos Mesh for orchestrating experiments
 - Chaos scenarios modeled on real production incidents diagnosed at Dell (storage latency, DNS misconfiguration, cert expiry, disk pressure/RAID, NTP/clock drift) — not generic random pod-killing

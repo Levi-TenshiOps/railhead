@@ -230,6 +230,24 @@ resource "kubernetes_secret_v1" "alertmanager_slack_webhook" {
   }
 }
 
+# Same var.slack_webhook_url as the Secret above, duplicated into a second
+# Secret object in the railhead namespace. Not a copy-paste mistake: a pod's
+# secretKeyRef env var can only reference a Secret in its OWN namespace --
+# there is no cross-namespace env injection in Kubernetes -- and
+# railhead-remediator runs in railhead while Alertmanager runs in monitoring.
+# Terraform is still the single source of truth for the value; there are just
+# two Secret objects holding it, one per consuming namespace.
+resource "kubernetes_secret_v1" "railhead_remediator_slack_webhook" {
+  metadata {
+    name      = "railhead-remediator-slack-webhook"
+    namespace = kubernetes_namespace_v1.railhead.metadata[0].name
+  }
+
+  data = {
+    "webhook-url" = var.slack_webhook_url
+  }
+}
+
 # Deployed as its own ArgoCD Application rather than via Terraform's helm
 # provider, specifically because kube-prometheus-stack bundles its own CRDs
 # (ServiceMonitor, PrometheusRule, etc.). Installing those CRDs and any
@@ -517,6 +535,44 @@ resource "kubernetes_manifest" "observability_application" {
                         annotations = {
                           summary     = "Railhead API burning latency budget (latency SLO)"
                           description = "The fraction of requests slower than 300ms has exceeded 6x the sustainable rate for the 95%-under-300ms SLO, over both a 6h and 30m window. At this rate the entire 30-day latency budget is exhausted in about 5 days."
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    # Per-pod error-rate alert, NOT a burn-rate rule like the
+                    # two groups above. This fires when ONE pod is serving
+                    # majority 5xx while its siblings behind the same Service
+                    # stay healthy -- exactly the corrupted-connection-pool
+                    # scenario the remediator quarantines. An aggregate
+                    # sum-over-all-pods burn-rate alert would never catch
+                    # this: one bad pod among several healthy ones barely
+                    # moves the aggregate error rate. `by (namespace, pod)`
+                    # is what makes a single misbehaving pod visible, and the
+                    # resulting `pod` label is what the remediator's webhook
+                    # needs to know which pod to act on.
+                    name = "railhead-api-pod-error-rate"
+                    rules = [
+                      {
+                        alert = "RailheadAPIPodErrorRate"
+                        expr  = <<-EOT
+                          (
+                            sum by (namespace, pod) (
+                              rate(http_requests_total{job="railhead-api", handler!="/health", status=~"5xx"}[5m])
+                            )
+                            /
+                            sum by (namespace, pod) (
+                              rate(http_requests_total{job="railhead-api", handler!="/health"}[5m])
+                            )
+                          ) > 0.5
+                        EOT
+                        "for" = "2m"
+                        labels = {
+                          severity = "warning"
+                        }
+                        annotations = {
+                          summary     = "Pod {{ $labels.pod }} is serving majority 5xx while its siblings are healthy"
+                          description = "Pod {{ $labels.pod }} in {{ $labels.namespace }} has had a >50% 5xx rate on non-health-check requests for at least 2 minutes, while the Service's other replicas aren't showing the same pattern. This is the corrupted-connection-pool failure mode (see the railhead-remediator README section), not a shared dependency outage -- quarantining this one pod is the correct response."
                         }
                       }
                     ]

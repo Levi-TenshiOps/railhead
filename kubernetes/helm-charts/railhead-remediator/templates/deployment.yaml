@@ -18,6 +18,16 @@ spec:
         - name: railhead-remediator
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: NAMESPACE
+              value: {{ .Values.namespace }}
+            - name: DEPLOYMENT
+              value: railhead-api
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: railhead-remediator-slack-webhook
+                  key: webhook-url
           ports:
             - containerPort: 8080
           livenessProbe:
