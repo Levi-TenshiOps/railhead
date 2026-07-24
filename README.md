@@ -1,12 +1,12 @@
-> **Status:** Actively in development — Weeks 1-6 of 8. Infrastructure, CI/CD, GitOps, and observability (metrics, logs, alerting) are done and verified. In progress: automated remediation (finishing Week 6), then chaos engineering (Week 7).
+> **Status:** Weeks 1-6 of 8 complete — infrastructure, CI/CD, GitOps, observability (metrics, logs, alerting), and automated remediation are all done and verified. Actively in development: chaos engineering (Week 7), then final polish (Week 8).
 
 # Railhead — Production-Grade SRE Platform on AWS
 
 Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and now monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account, not just configured and left untested.
 
-Two pieces are still ahead. First, automated remediation: when an alert fires, a script attempts a fix on its own — restart, scale, cordon — and escalates to a human only if it can't resolve things itself. Second, chaos engineering: deliberately injecting the kinds of failures I've actually diagnosed running production VxRail/vSAN clusters at Dell — storage latency, DNS misconfiguration, cert expiry, disk pressure — and measuring how much of that the system catches on its own.
+Automated remediation is already built: when a pod is serving majority errors while its siblings stay healthy, a script quarantines it — relabeling it out of the Service and ReplicaSet selectors so traffic stops and a healthy replacement is created, while the broken pod keeps running for inspection. One piece is still ahead: chaos engineering, deliberately injecting the kinds of failures I've actually diagnosed running production VxRail/vSAN clusters at Dell — storage latency, DNS misconfiguration, cert expiry, disk pressure — and measuring how much of that the system catches on its own.
 
-Full status, what's built, and what's still in progress: see the Roadmap below.
+Full status: see Architecture below for what's built, Roadmap for what's left.
 
 ## Why "Railhead"
 
@@ -20,122 +20,16 @@ Everything below is live and verified against a real AWS account — nothing her
 - **VPC** (`terraform/modules/vpc`): 2 public + 2 private subnets across 2 AZs, one NAT Gateway shared by both private subnets — a deliberate cost tradeoff for dev (production would run one per AZ). Subnets are pre-tagged for EKS/load-balancer discovery.
 - **GitHub Actions OIDC** (`terraform/modules/iam`): CI authenticates to AWS with short-lived OIDC tokens instead of long-lived keys sitting in GitHub Secrets.
 - **ECR** (`terraform/modules/ecr`): immutable image tags, vulnerability scanning on push, and a lifecycle policy so image storage doesn't grow forever.
-- **CI pipeline** (`.github/workflows/ci.yml`): every push and pull request builds both service images (`api`, `worker`) and scans them with Trivy. Any HIGH or CRITICAL vulnerability fails the build — no exceptions, no bypass. AWS credentials are only issued on pushes to `main`, never on a PR run, so a malicious PR can't steal real credentials even if it tried. Bumping the deployed image tag is a manual commit rather than an automated CI step — a deliberate choice to avoid the added complexity of giving CI write access to the repo, and to keep a human in the loop before any new image actually goes live.
-- **EKS** (`terraform/modules/eks`): a managed control plane, a 2x t3.medium node group, and core add-ons (VPC CNI, CoreDNS, kube-proxy, EBS CSI) all through Terraform. EBS CSI runs on IAM Roles for Service Accounts (IRSA) alone; VPC CNI needs a node-level policy to bootstrap before its own IRSA role takes over.
+- **CI pipeline** (`.github/workflows/ci.yml`): every push and pull request builds all three service images (`api`, `worker`, `remediator`) and scans them with Trivy. Any HIGH or CRITICAL vulnerability fails the build — no exceptions, no bypass. AWS credentials are only issued on pushes to `main`, never on a PR run, so a malicious PR can't steal real credentials even if it tried. Bumping the deployed image tag is a manual commit rather than an automated CI step — a deliberate choice to avoid the added complexity of giving CI write access to the repo, and to keep a human in the loop before any new image actually goes live.
+- **EKS** (`terraform/modules/eks`): a managed control plane, a 2x t3.large node group (sized for the pod-per-node ceiling — see [Known Gotchas](docs/known-gotchas.md)), and core add-ons (VPC CNI, CoreDNS, kube-proxy, EBS CSI) all through Terraform. EBS CSI runs on IAM Roles for Service Accounts (IRSA) alone; VPC CNI needs a node-level policy to bootstrap before its own IRSA role takes over.
 - **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a small FastAPI service backed by Postgres, plus a worker that exercises the API on a loop. On first install, the API briefly crash-loops while Postgres is still starting — nothing waits for DB readiness yet — then self-recovers within about a minute. Known, not hidden; an `initContainer` is the obvious fix, just not built.
 - **GitOps** (`terraform/modules/argocd`): ArgoCD deploys the app from a git-tracked `Application`, with `selfHeal` and `prune` on — no one runs `helm install` by hand anymore. Proven, not just configured: scaling the API to 0 by hand was reverted back to 2 replicas in about a second, with zero human involvement.
 - **Metrics** (`terraform/modules/argocd`, kube-prometheus-stack): Prometheus and Grafana, deployed as their own ArgoCD Application. The API exposes `/metrics` via `prometheus-fastapi-instrumentator`. Dashboards are code — JSON committed to the repo, auto-loaded by Grafana's sidecar — so wiping the Grafana PVC doesn't lose them.
 - **Logs** (`terraform/modules/argocd`, Loki + Grafana Alloy): Loki aggregates logs cluster-wide (S3-backed, 7-day retention), shipped by Alloy as a DaemonSet. Alloy over the older Promtail specifically because Promtail hit end-of-life in March 2026. Grafana picks up Loki the same way it picks up dashboards — a labeled ConfigMap.
 - **Alerting** (`terraform/modules/argocd`, Alertmanager): two SLOs — 99% availability (5xx only; a bad client request isn't a service failure, so 4xx doesn't count) and 95% of requests under 300ms. Each gets the burn-rate math the Google SRE Workbook recommends: a fast/critical rule (14.4x the sustainable rate, sustained over both a 1-hour and 5-minute window) and a slower/warning one (6x, over 6 hours and 30 minutes). Alertmanager posts both severities to one Slack channel, color- and emoji-coded so you can tell them apart at a glance. Proven live: I took Postgres offline, threw a burst of traffic at the API, and watched the alert land in Slack. There's a runbook (`docs/runbooks/api-high-error-rate.md`) for what to do when it fires.
+- **Automated remediation** (`app/remediator`, `kubernetes/helm-charts/railhead-remediator`): a Flask webhook receiver that Alertmanager posts to. On a per-pod error-rate alert, it quarantines the pod — relabeling it out of both the Service and ReplicaSet selectors in one patch, so traffic stops and a healthy replacement is created immediately, while the broken pod keeps running for inspection and is deleted after a TTL. Guarded against acting where it shouldn't: refuses if quarantining would leave no pod serving traffic, if multiple pods are alerting at once (a shared failure, not one bad pod), or if it's already quarantined 3 pods in 15 minutes. Full reasoning in the dedicated section below.
 
 ## Roadmap
-
-### Week 6 — SLOs, Alerting, and Auto-Remediation
-
-**Session A — done:** two SLOs (99% availability, 95% of requests under 300ms), each with a fast/critical and slow/warning burn-rate alert; Alertmanager wired to Slack, color-coded by severity; a written incident runbook. Details above.
-
-**Session B — next up:**
-- An automated remediation script: Alertmanager webhook → Python → attempts a fix (restart/scale/cordon) → escalates to a human if it can't resolve the issue itself
-
-## Automated remediation: pod quarantine
-
-### Background
-
-`railhead-api` runs 2 replicas behind a single Service. During load testing we
-hit a state where the error rate sat at roughly 50% and stayed there. Both pods
-were `1/1 Running` and `Ready`. Restarting the deployment cleared it.
-
-The cause was one pod's connection pool, not the database.
-`psycopg2.pool.SimpleConnectionPool` is documented as not thread-safe, and
-FastAPI dispatches sync `def` routes through a threadpool. Under concurrency
-the pool's internal bookkeeping can be corrupted: connections are checked out
-and never recorded as returned, and once the in-use count reaches `maxconn`,
-every subsequent `getconn()` raises `PoolError` permanently.
-
-That pool lives in one pod's memory. The other pod was unaffected.
-
-### Why Kubernetes never noticed
-
-The readiness probe hits `/health`:
-
-    @app.get("/health")
-    def health():
-        return {"status": "ok"}
-
-It returns a hardcoded value and never touches the database. Kubernetes asked
-"are you ok?", the pod said yes, and traffic kept being split 50/50.
-
-Kubernetes behaved correctly. The health check answers *"is the web server
-running?"* when the useful question is *"can you actually do your job?"*
-
-### Why a better probe isn't enough: it never restores capacity
-
-Making the readiness probe run `SELECT 1` would stop traffic to the broken pod.
-It would not replace it.
-
-A pod failing readiness is still `Running` and still matches the ReplicaSet's
-label selector. The ReplicaSet's contract is keeping N pods that *match its
-selector* — readiness plays no part in that count. So the count stays at 2, no
-replacement is created, and the service runs at half capacity indefinitely.
-
-Moving the check to the liveness probe doesn't help either: the container
-restarts, hits the same condition, and enters CrashLoopBackOff. You lose the
-pod for diagnosis and gain a backoff timer.
-
-**No probe configuration produces a healthy replacement.** Removing the pod
-from the ReplicaSet's *selector* does.
-
-### What the script does
-
-On a per-pod error-rate alert, it patches one label on the named pod:
-
-    app: railhead-api  ->  app: railhead-api-quarantined
-
-That label appears in two selectors, so one patch does two things:
-
-- the **Service** selector no longer matches — the pod leaves Endpoints and
-  traffic stops
-- the **ReplicaSet** selector no longer matches — the ReplicaSet releases the
-  pod and creates a replacement, restoring capacity
-
-The broken pod keeps running and is available for inspection. Kubernetes
-orphans it completely (the ReplicaSet strips its ownerReference), so nothing
-will ever garbage-collect it — the script deletes quarantined pods after a TTL.
-
-### Scope: this stops the bleeding, it does not cure the disease
-
-The script does not fix Postgres, the network, or the application. It stops
-users reaching the broken pod, restores capacity, preserves the pod for
-diagnosis, and reports what it did. The replacement pod helps only when the
-fault was pod-local — a corrupted pool, a node-level network issue.
-
-### Guards
-
-- **Minimum remaining ready** — never quarantine if it would leave no pod
-  serving traffic.
-- **Multi-pod detection** — if more than one pod is alerting in the same
-  Alertmanager payload, this is a shared failure and quarantining is useless
-  (every replacement would be equally broken). Refuse and escalate.
-- **Quarantine budget** — 3 quarantines in 15 minutes indicates a bad
-  deployment rather than one bad pod. Refuse and escalate.
-
-If Postgres itself goes down, all replicas fail together. The multi-pod guard
-usually catches this on the first payload; the budget guard is the backstop if
-alerts arrive separately.
-
-### Design decision: `/health` stays database-free
-
-Deliberate, not an oversight. A readiness probe that checks a shared dependency
-fails every replica simultaneously when that dependency dies, converting
-partial degradation into a total outage. Readiness should answer "can I
-serve?", not "is everything downstream healthy?".
-
-### Limitation
-
-Detection takes ~5 minutes end to end: scrape interval, 5m rate window,
-`for: 2m` hold, Alertmanager grouping delay. A service mesh with outlier
-detection would eject a bad endpoint in seconds — but would also destroy the
-evidence.
 
 ### Week 7 — Chaos Engineering
 - Chaos Mesh for orchestrating experiments
@@ -156,16 +50,21 @@ evidence.
 
 Built and torn down incrementally, not left running. Billable resources — the EKS control plane, the node group, the NAT Gateway — get destroyed at the end of each session (`terraform destroy -target=module.eks -target=module.vpc`) and rebuilt when the next one starts. The state backend, IAM, and ECR cost nothing to leave running, so they persist between sessions — nothing has to be rebuilt from scratch. A $50/month budget alert and a zero-spend safety net back this up. Active development runs for pennies; fully torn down, it's $0/month.
 
+## Automated Remediation
+
+`railhead-api` runs 2 replicas behind one Service. Under load, one pod's `psycopg2.pool.SimpleConnectionPool` — not thread-safe, but used directly under FastAPI's threadpool — got its internal bookkeeping corrupted: every `getconn()` started raising, and the pod served ~50% errors while still showing `1/1 Running` and `Ready`. Its readiness probe hits `/health`, which is deliberately database-free (checking a shared dependency there would fail every replica at once, turning partial degradation into a total outage), so Kubernetes never noticed.
+
+A better probe wouldn't have helped either: a pod failing readiness still matches the ReplicaSet's selector and still counts toward the replica total, so no replacement gets created — the service would just run at half capacity indefinitely. The only thing that reliably fixes this is changing the pod's label so it drops out of the ReplicaSet's selector entirely.
+
+On a per-pod error-rate alert, `railhead-remediator` (`app/remediator`) does exactly that: it patches the pod's `app` label to `railhead-api-quarantined`. That one change drops it out of both the Service selector (traffic stops) and the ReplicaSet selector (a healthy replacement is created) in a single call. The broken pod keeps running, orphaned, for inspection, and is deleted after a 60-minute TTL. Three guards keep it from acting where it shouldn't: it refuses if quarantining would leave no pod serving traffic, if multiple pods are alerting at once (a shared failure, not one bad pod), or after 3 quarantines in 15 minutes (a bad deployment, not one bad pod).
+
+Proven live, not just written: a real pod's DNS was broken and its Postgres connections terminated from the server side, forcing genuine 500s while `/health` kept passing. The alert fired, the pod was quarantined, a healthy replacement was scheduled, and the untouched control pod proved the fault stayed isolated.
+
+This stops the bleeding, not the disease — it doesn't fix Postgres or the network, just restores capacity and preserves evidence. Detection takes ~5 minutes end to end (scrape interval, rate window, alert hold, Alertmanager grouping); a service mesh could eject a bad endpoint faster, but would destroy the evidence in the process.
+
 ## Known gotchas
 
-Real problems hit while building this, kept here rather than quietly fixed and forgotten.
-
-- **VPC CNI pod-per-node ceiling.** EKS's default networking limits pods per node by available ENI IP addresses, not CPU or memory — `t3.medium` caps out at 17 pods, `t3.large` at 35. Nothing warns you before you hit it; a pod just sits `Pending` with `Too many pods` in its events. Prefix delegation would raise the ceiling further, but memory becomes the binding constraint before IP addresses do on these instance sizes.
-- **Any value change in the `observability` Helm release triggers a Grafana Deployment rollout**, via a config-checksum annotation baked into the chart — even changes with nothing to do with Grafana (adding a PrometheusRule, in one real case). On a cluster already at its pod-per-node ceiling, the rollout's surge pod can't schedule, because Grafana's PV is AZ-pinned by node affinity and there's no room in that AZ. Grafana keeps serving fine on the old pod the whole time; the Application just shows `Progressing` instead of `Healthy` indefinitely. Fix is deleting the OLD pod (frees both the node slot and the volume attachment) — never the `Pending` one, since the ReplicaSet just recreates that immediately. This is the second time this project has hit the same underlying lesson: to unstick a resource contention deadlock, remove the thing holding the resource first and let the reconciler recreate, don't fight the thing that can't schedule.
-- **Node group instance-type changes force full node replacement**, not a rolling update — Terraform tears down every existing node before creating the replacements, so there's a real window with zero worker nodes. Before doing this, verify every PVC's availability zone is actually covered by the node group's subnets; a PVC pinned to an AZ the node group can't launch into means that pod is permanently `Pending` after replacement, not just briefly.
-- **ECR lifecycle eviction has now silently broken a live deployment twice.** The 10-image tagged-retention cap doesn't care whether a tag is currently deployed — it evicts the oldest tag once the count is exceeded, even if that tag is what a running Deployment still references. It's invisible while the pod using that tag keeps running (the image is already pulled and cached locally), and only surfaces the moment that pod needs a fresh pull — a node replacement, a reschedule, anything that lands the pod on a node without the image cached. Week 7's chaos experiments reschedule pods constantly, so this will keep recurring until the retention count is raised.
-- **A JSON file with a UTF-8 BOM will silently fail Grafana's file-based dashboard provisioner** with an opaque `invalid character` parse error — and because Grafana's SQLite database persists any dashboard it has ever successfully loaded, a BOM introduced when a file was first *saved* (before its first successful load) can go unnoticed indefinitely, since the working copy already lives in the database. It only surfaces on whatever event forces a truly clean re-provisioning from that file — a PVC reset, or a pod rescheduled by a node group replacement.
-- **A live `kubectl exec`-based password reset against Grafana's admin user doesn't survive by itself.** `grafana cli admin reset-admin-password` writes straight to the SQLite file while the running server already has it open — the server process needs a restart to actually pick up the change. And since the sidecar container that triggers dashboard/datasource reloads authenticates using the Secret's `admin-password` value (not whatever the CLI just set), a manual password reset and a manual Secret edit have to happen together, or the sidecar's reload calls start failing with 401 even though the human login works fine.
+Real problems hit while building this, kept in [`docs/known-gotchas.md`](docs/known-gotchas.md) rather than quietly fixed and forgotten.
 
 ## Screenshots
 

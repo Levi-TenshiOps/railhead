@@ -77,12 +77,22 @@ def sweep_and_count():
     """
     now = int(time.time())
     recent = 0
-    pods = core.list_namespaced_pod(NAMESPACE, label_selector=QUARANTINED_AT)
+    pods = core.list_namespaced_pod(
+        NAMESPACE, label_selector=QUARANTINED_AT, _request_timeout=10
+    )
     for pod in pods.items:
         age = now - int(pod.metadata.labels[QUARANTINED_AT])
         if age > QUARANTINE_TTL:
-            core.delete_namespaced_pod(pod.metadata.name, NAMESPACE)
-            log.info("ttl sweep: deleted %s (age %ds)", pod.metadata.name, age)
+            try:
+                core.delete_namespaced_pod(
+                    pod.metadata.name, NAMESPACE, _request_timeout=10
+                )
+                log.info("ttl sweep: deleted %s (age %ds)", pod.metadata.name, age)
+            except ApiException as exc:
+                log.warning(
+                    "ttl sweep: could not delete %s (age %ds): %s",
+                    pod.metadata.name, age, exc,
+                )
         elif age <= QUARANTINE_WINDOW:
             recent += 1
     return recent
@@ -90,7 +100,7 @@ def sweep_and_count():
 
 def get_pod(name):
     try:
-        return core.read_namespaced_pod(name, NAMESPACE)
+        return core.read_namespaced_pod(name, NAMESPACE, _request_timeout=10)
     except ApiException as exc:
         if exc.status == 404:
             return None
@@ -98,7 +108,7 @@ def get_pod(name):
 
 
 def ready_replicas():
-    dep = apps.read_namespaced_deployment(DEPLOYMENT, NAMESPACE)
+    dep = apps.read_namespaced_deployment(DEPLOYMENT, NAMESPACE, _request_timeout=10)
     return dep.status.ready_replicas or 0
 
 
@@ -108,7 +118,7 @@ def gather_evidence(pod):
     status = (pod.status.container_statuses or [None])[0]
     try:
         logs = core.read_namespaced_pod_log(
-            pod.metadata.name, NAMESPACE, tail_lines=30
+            pod.metadata.name, NAMESPACE, tail_lines=30, _request_timeout=10
         )
     except ApiException as exc:
         logs = f"(logs unavailable: {exc.status})"
@@ -138,6 +148,7 @@ def quarantine(pod, alertname):
                 }
             }
         },
+        _request_timeout=10,
     )
 
 
@@ -172,7 +183,15 @@ def handle_alert(alert, recent, multi_pod):
         log.info("%s already quarantined, skipping", pod_name)
         return
 
-    ready = ready_replicas()
+    try:
+        ready = ready_replicas()
+    except ApiException as exc:
+        notify(
+            f":no_entry: Refusing to quarantine `{pod_name}`: could not read "
+            f"`{DEPLOYMENT}`'s ready replica count ({exc.status}). Needs a human."
+        )
+        return
+
     if ready - 1 < MIN_REMAINING_READY:
         notify(
             f":no_entry: Refusing to quarantine `{pod_name}`: only {ready} ready "

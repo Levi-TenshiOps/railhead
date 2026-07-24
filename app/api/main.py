@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI):
         dbname=DB_NAME,
         user=DB_USER,
         password=DB_PASSWORD,
+        connect_timeout=5,
     )
     conn = db_pool.getconn()
     try:
@@ -104,7 +105,7 @@ def create_item(item: ItemCreate):
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO items (name) VALUES (%s) RETURNING id, name, created_at",
-                (item.name,),
+                (item.name.strip(),),
             )
             row = cur.fetchone()
         conn.commit()
