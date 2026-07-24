@@ -31,9 +31,13 @@ resource "aws_ecr_repository" "this" {
 # images (leftovers from builds that got re-tagged, or failed pushes)
 # have no way to ever be referenced again, so there's no reason to keep
 # paying storage for them past a short grace period. Capping tagged
-# images at the most recent 10 stops an ever-growing image history from
+# images at the most recent 30 stops an ever-growing image history from
 # silently accumulating storage cost for versions nobody will ever
-# deploy again.
+# deploy again. Raised from 10 to 30 after this cap silently evicted a
+# still-deployed tag twice -- every push rebuilds all matrix services
+# regardless of what changed, so 10 was too easy to exceed with unrelated
+# commits (docs, README, a single service's own changes) before anyone
+# manually bumped every service's deployed tag.
 resource "aws_ecr_lifecycle_policy" "this" {
   for_each = aws_ecr_repository.this
 
@@ -56,12 +60,12 @@ resource "aws_ecr_lifecycle_policy" "this" {
       },
       {
         rulePriority = 2
-        description  = "Keep only the most recent 10 tagged images"
+        description  = "Keep only the most recent 30 tagged images"
         selection = {
           tagStatus      = "tagged"
           tagPatternList = ["*"]
           countType      = "imageCountMoreThan"
-          countNumber    = 10
+          countNumber    = 30
         }
         action = {
           type = "expire"
