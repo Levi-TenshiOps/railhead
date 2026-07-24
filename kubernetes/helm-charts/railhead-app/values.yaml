@@ -1,7 +1,7 @@
 api:
   image:
     repository: 993268717190.dkr.ecr.us-east-1.amazonaws.com/railhead-api
-    tag: "32f4186"
+    tag: "b2e37c9"
   replicaCount: 2
   service:
     port: 80
@@ -16,7 +16,7 @@ api:
 worker:
   image:
     repository: 993268717190.dkr.ecr.us-east-1.amazonaws.com/railhead-worker
-    tag: "32f4186"
+    tag: "b2e37c9"
   replicaCount: 1
   resources:
     requests:
