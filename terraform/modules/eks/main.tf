@@ -136,7 +136,7 @@ resource "aws_eks_node_group" "this" {
   subnet_ids      = var.subnet_ids
 
   ami_type       = "AL2023_x86_64_STANDARD"
-  instance_types = ["t3.medium"]
+  instance_types = ["t3.large"]
   capacity_type  = "ON_DEMAND"
 
   scaling_config {
