@@ -16,11 +16,23 @@ A railhead is where a rail line physically ends and cargo transfers onward to it
 
 Everything below is live and verified against a real AWS account — nothing here is aspirational.
 
+```mermaid
+flowchart LR
+    dev([Developer]) -->|git push| gh[GitHub]
+    gh -->|OIDC, no static keys| ci[Actions: build + Trivy gate]
+    ci -->|push image| ecr[(ECR)]
+    gh -->|watches main| argo[ArgoCD: selfHeal + prune]
+    argo -->|deploys| eks[EKS cluster]
+    ecr -.->|image pull| eks
+```
+
+Two paths lead into the cluster and they never cross: container images travel through GitHub Actions into ECR, while *configuration* travels through ArgoCD. CI holds no cluster credentials and never runs `kubectl`; ArgoCD holds no AWS credentials. Neither one can do the other's job, which is the point.
+
 - **Terraform state backend** (`terraform/bootstrap`): an encrypted, versioned S3 bucket plus a DynamoDB lock table, so state stays safe under concurrent runs.
 - **VPC** (`terraform/modules/vpc`): 2 public + 2 private subnets across 2 AZs, one NAT Gateway shared by both private subnets — a deliberate cost tradeoff for dev (production would run one per AZ). Subnets are pre-tagged for EKS/load-balancer discovery.
 - **GitHub Actions OIDC** (`terraform/modules/iam`): CI authenticates to AWS with short-lived OIDC tokens instead of long-lived keys sitting in GitHub Secrets.
 - **ECR** (`terraform/modules/ecr`): immutable image tags, vulnerability scanning on push, and a lifecycle policy so image storage doesn't grow forever.
-- **CI pipeline** (`.github/workflows/ci.yml`): every push and pull request builds all three service images (`api`, `worker`, `remediator`) and scans them with Trivy. Any HIGH or CRITICAL vulnerability fails the build — no exceptions, no bypass. AWS credentials are only issued on pushes to `main`, never on a PR run, so a malicious PR can't steal real credentials even if it tried. Bumping the deployed image tag is a manual commit rather than an automated CI step — a deliberate choice to avoid the added complexity of giving CI write access to the repo, and to keep a human in the loop before any new image actually goes live.
+- **CI pipeline** (`.github/workflows/ci.yml`): every push and pull request builds all three service images (`api`, `worker`, `remediator`) and scans them with Trivy. Any HIGH or CRITICAL vulnerability with a fix available fails the build. Unfixed CVEs are excluded on purpose (`ignore-unfixed: true`) — gating on vulnerabilities that have no upstream patch yet just trains people to bypass the gate instead of fixing anything. AWS credentials are only issued on pushes to `main`, never on a PR run, so a malicious PR can't steal real credentials even if it tried. Bumping the deployed image tag is a manual commit rather than an automated CI step — a deliberate choice to avoid the added complexity of giving CI write access to the repo, and to keep a human in the loop before any new image actually goes live.
 - **EKS** (`terraform/modules/eks`): a managed control plane, a 2x t3.large node group (sized for the pod-per-node ceiling — see [Known Gotchas](docs/known-gotchas.md)), and core add-ons (VPC CNI, CoreDNS, kube-proxy, EBS CSI) all through Terraform. EBS CSI runs on IAM Roles for Service Accounts (IRSA) alone; VPC CNI needs a node-level policy to bootstrap before its own IRSA role takes over.
 - **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a small FastAPI service backed by Postgres, plus a worker that exercises the API on a loop. On first install, the API briefly crash-loops while Postgres is still starting — nothing waits for DB readiness yet — then self-recovers within about a minute. Known, not hidden; an `initContainer` is the obvious fix, just not built.
 - **GitOps** (`terraform/modules/argocd`): ArgoCD deploys the app from a git-tracked `Application`, with `selfHeal` and `prune` on — no one runs `helm install` by hand anymore. Proven, not just configured: scaling the API to 0 by hand was reverted back to 2 replicas in about a second, with zero human involvement.
@@ -49,7 +61,7 @@ Everything below is live and verified against a real AWS account — nothing her
 
 Built and torn down incrementally, not left running. The expensive resources — the EKS control plane, the node group, and the NAT Gateway — are destroyed at the end of every session (`terraform destroy -target=module.eks -target=module.vpc`) and rebuilt at the start of the next. Together they run about $0.31/hour at list price, so a working session costs roughly a dollar instead of the ~$227/month they'd cost left running.
 
-What persists between sessions is deliberately the cheap half: the S3/DynamoDB state backend, the IAM roles, the ECR repositories, and the S3 bucket holding Loki's log chunks. That's about $0.25/month in total, almost all of it ECR image storage — worth paying so nothing has to be rebuilt from scratch. A $50/month budget alarm and a zero-spend alert back the whole thing up.
+What persists between sessions is deliberately the cheap half: the S3/DynamoDB state backend, the IAM roles, the ECR repositories, and the S3 bucket holding Loki's log chunks. That's about $0.25/month in total, almost all of it ECR image storage — worth paying so nothing has to be rebuilt from scratch. A $50/month budget alarm and a zero-spend alert back the whole thing up. Both live at the account level rather than in this repo's Terraform — deliberately, so that tearing down the workload can never take the spend guardrails down with it.
 
 ## Automated Remediation
 
@@ -59,7 +71,19 @@ A better probe wouldn't have helped either: a pod failing readiness still matche
 
 On a per-pod error-rate alert, `railhead-remediator` (`app/remediator`) does exactly that: it patches the pod's `app` label to `railhead-api-quarantined`. That one change drops it out of both the Service selector (traffic stops) and the ReplicaSet selector (a healthy replacement is created) in a single call. The broken pod keeps running, orphaned, for inspection, and is deleted after a 60-minute TTL. Three guards keep it from acting where it shouldn't: it refuses if quarantining would leave no pod serving traffic, if multiple pods are alerting at once (a shared failure, not one bad pod), or after 3 quarantines in 15 minutes (a bad deployment, not one bad pod).
 
-Proven live, not just written: a real pod's DNS was broken and its Postgres connections terminated from the server side, forcing genuine 500s while `/health` kept passing. The alert fired, the pod was quarantined, a healthy replacement was scheduled, and the untouched control pod proved the fault stayed isolated.
+```mermaid
+flowchart LR
+    api[railhead-api pod] -->|/metrics| prom[Prometheus]
+    prom -->|one pod over 50% 5xx| am[Alertmanager]
+    am -->|notify| slack([Slack])
+    am -->|webhook| rem[remediator]
+    rem -->|patch app label| api
+    rem -->|evidence block| slack
+```
+
+Both arrows out of Alertmanager come from a *single* receiver — every critical and warning alert reaches the remediator's webhook exactly the way it reaches Slack. What is actually safe to act on is decided in `remediate.py` (`AUTO_REMEDIATE_ALERTS`), not in Alertmanager's routing tree, so widening or narrowing what gets auto-fixed stays a one-line change in one place instead of two configs that can drift apart.
+
+Proven live, not just written: a real pod's DNS was broken and its Postgres connections terminated from the server side, forcing genuine 500s while `/health` kept passing. The alert fired, the pod was quarantined, a healthy replacement was scheduled, and the untouched control pod proved the fault stayed isolated. The full step-by-step run — every expected-vs-actual check, including the ones confirming the control pod and the EndpointSlice behaved correctly — is recorded in [`docs/remediator-t2-trigger-validation.md`](docs/remediator-t2-trigger-validation.md).
 
 This stops the bleeding, not the disease — it doesn't fix Postgres or the network, just restores capacity and preserves evidence. Detection takes ~5 minutes end to end (scrape interval, rate window, alert hold, Alertmanager grouping); a service mesh could eject a bad endpoint faster, but would destroy the evidence in the process.
 
