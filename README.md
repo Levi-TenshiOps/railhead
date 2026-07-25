@@ -41,14 +41,15 @@ Everything below is live and verified against a real AWS account — nothing her
 ### Week 8 — Polish, Security/Cost Pass, and Demo
 - Security pass: network policies, IAM least-privilege review, secrets hygiene
 - Cost pass: right-sizing, revisit Spot instances for nodes
-- Repo made public at Week 5, ahead of the original Week 8 plan, to support active SRE job applications.
 - Decide how to deliberately use remaining AWS credits on something higher-value (candidates already on record: temporary production-scale demo config, EFK built alongside Loki as a comparison, Karpenter, or a multi-region DR simulation stretch)
 - Final README pass, architecture diagram, clean commit history
 - Demo video
 
 ## Cost approach
 
-Built and torn down incrementally, not left running. Billable resources — the EKS control plane, the node group, the NAT Gateway — get destroyed at the end of each session (`terraform destroy -target=module.eks -target=module.vpc`) and rebuilt when the next one starts. The state backend, IAM, and ECR cost nothing to leave running, so they persist between sessions — nothing has to be rebuilt from scratch. A $50/month budget alert and a zero-spend safety net back this up. Active development runs for pennies; fully torn down, it's $0/month.
+Built and torn down incrementally, not left running. The expensive resources — the EKS control plane, the node group, and the NAT Gateway — are destroyed at the end of every session (`terraform destroy -target=module.eks -target=module.vpc`) and rebuilt at the start of the next. Together they run about $0.31/hour at list price, so a working session costs roughly a dollar instead of the ~$227/month they'd cost left running.
+
+What persists between sessions is deliberately the cheap half: the S3/DynamoDB state backend, the IAM roles, the ECR repositories, and the S3 bucket holding Loki's log chunks. That's about $0.25/month in total, almost all of it ECR image storage — worth paying so nothing has to be rebuilt from scratch. A $50/month budget alarm and a zero-spend alert back the whole thing up.
 
 ## Automated Remediation
 
