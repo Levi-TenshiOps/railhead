@@ -126,7 +126,9 @@ resource "aws_iam_role_policy_attachment" "node_cni" {
 }
 
 # ---------------------------------------------------------------------------
-# Managed node group — 2x t3.medium on-demand, AL2023
+# Managed node group — 2x t3.large on-demand, AL2023. Sized for the VPC CNI's
+# pod-per-node ceiling, not CPU/memory: t3.medium caps out at 17 pods and
+# t3.large at 35. See docs/known-gotchas.md for how that ceiling surfaces.
 # ---------------------------------------------------------------------------
 
 resource "aws_eks_node_group" "this" {
