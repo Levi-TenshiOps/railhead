@@ -31,13 +31,22 @@ resource "aws_ecr_repository" "this" {
 # images (leftovers from builds that got re-tagged, or failed pushes)
 # have no way to ever be referenced again, so there's no reason to keep
 # paying storage for them past a short grace period. Capping tagged
-# images at the most recent 30 stops an ever-growing image history from
-# silently accumulating storage cost for versions nobody will ever
-# deploy again. Raised from 10 to 30 after this cap silently evicted a
-# still-deployed tag twice -- every push rebuilds all matrix services
-# regardless of what changed, so 10 was too easy to exceed with unrelated
-# commits (docs, README, a single service's own changes) before anyone
-# manually bumped every service's deployed tag.
+# images stops an ever-growing image history from silently accumulating
+# storage cost for versions nobody will ever deploy again. Raised from 10
+# to 30 after this cap silently evicted a still-deployed tag twice --
+# every push rebuilds all matrix services regardless of what changed, so
+# 10 was too easy to exceed with unrelated commits (docs, README, a
+# single service's own changes) before anyone manually bumped every
+# service's deployed tag.
+#
+# Raised again from 30 to 100 for the same reason, caught earlier this
+# time: what predicts eviction is not the repository's total image count
+# but the deployed tag's POSITION in the queue -- how many images are
+# newer than it. railhead-worker's deployed tag sat 16 deep at 24 images,
+# leaving 13 pushes of headroom versus 19 for the other two, because its
+# tag is older and every unrelated commit pushes past it. 100 restores a
+# margin measured in months rather than weeks. Storage stays under
+# $1/month at this cap.
 resource "aws_ecr_lifecycle_policy" "this" {
   for_each = aws_ecr_repository.this
 
@@ -60,12 +69,12 @@ resource "aws_ecr_lifecycle_policy" "this" {
       },
       {
         rulePriority = 2
-        description  = "Keep only the most recent 30 tagged images"
+        description  = "Keep only the most recent 100 tagged images"
         selection = {
           tagStatus      = "tagged"
           tagPatternList = ["*"]
           countType      = "imageCountMoreThan"
-          countNumber    = 30
+          countNumber    = 100
         }
         action = {
           type = "expire"
