@@ -16,5 +16,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 COPY main.py .
 
+# Runs as an unprivileged user. The port is 8000, above 1024, so binding
+# needs no privilege — root buys nothing here and only widens what a
+# container escape would land on.
+RUN useradd --system --uid 1000 --no-create-home app
+USER app
+
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

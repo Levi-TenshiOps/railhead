@@ -16,4 +16,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 COPY worker.py .
 
+# Runs as an unprivileged user. It only makes outbound HTTP calls and binds
+# no port at all, so there is nothing here that root is required for.
+RUN useradd --system --uid 1000 --no-create-home app
+USER app
+
 CMD ["python", "worker.py"]
