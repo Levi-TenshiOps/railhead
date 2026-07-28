@@ -13,6 +13,10 @@ no way to sequence that within a single run.
 
 Every step below is what an actual rebuild required, not an idealised version.
 
+None of the Terraform commands below carry `-auto-approve`, so each one prompts
+for confirmation. That is fine when typing `yes` by hand, and a blocker for any
+non-interactive or scripted run — add `-auto-approve` there.
+
 1. **Pass 1 — foundation and cluster:**
    ```
    terraform -chdir=terraform/environments/dev apply "-target=module.vpc" "-target=module.iam" "-target=module.ecr" "-target=module.eks"
@@ -25,8 +29,11 @@ Every step below is what an actual rebuild required, not an idealised version.
    ```
    terraform -chdir=terraform/environments/dev apply "-target=module.argocd.helm_release.argocd"
    ```
-   This creates the `argocd` namespace, its repo-credentials Secret, and the
-   Helm release. Confirm the CRDs landed before continuing:
+   This creates exactly **two** resources: the `argocd` namespace and the Helm
+   release. Terraform will report `2 added` — that is complete, not a partial
+   failure. The `railhead-repo-credentials` Secret is *not* a dependency of
+   `helm_release.argocd`, so `-target` does not pull it in; it appears in pass 3.
+   Confirm the CRDs landed before continuing:
    ```
    kubectl get crd | Select-String argoproj
    ```
@@ -38,8 +45,16 @@ Every step below is what an actual rebuild required, not an idealised version.
    terraform -chdir=terraform/environments/dev apply
    ```
    The five `Application` resources plan cleanly now. This also creates the
-   `railhead` and `monitoring` namespaces, the dashboards, and the Slack and
-   Postgres Secrets.
+   `railhead` and `monitoring` namespaces, the `railhead-repo-credentials`
+   Secret, the dashboards, and the Slack and Postgres Secrets.
+
+   **Go straight to pass 4 — do not pause here.** ArgoCD gives up on the
+   `observability` Application after five failed sync attempts, and those
+   attempts start the moment this pass creates it. If the Prometheus CRDs are in
+   place before ArgoCD exhausts its retries, the Application self-heals and pass
+   5 is never needed. One run that moved straight on reached all-green with no
+   intervention; an earlier run that bootstrapped the CRDs later required the
+   pass 5 patch to recover. The difference was only the delay between the passes.
 
 4. **Pass 4 — MANUAL: bootstrap the Prometheus Operator CRDs.** Nothing in
    Terraform or ArgoCD does this, and a cluster destroy removes them:
@@ -97,12 +112,16 @@ Expected:
 - **Applications** — all five (`alloy`, `loki`, `observability`, `railhead`,
   `railhead-remediator`) `Synced` and `Healthy`. `observability` is the slowest;
   give it a few minutes before treating it as stuck.
-- **Problem pods** — no output. The two `railhead-api` pods showing ~2 restarts
-  is expected and fine: they race Postgres on first start and settle on retry.
+- **Problem pods** — no output. The two `railhead-api` pods showing **2–3
+  restarts each** is expected and fine: they race Postgres on first start and
+  settle on retry. Observed runs have shown 2/2 and 3/2.
 - **PVCs** — three `Bound`: `observability-grafana` (2Gi), `storage-loki-0`
   (5Gi), `data-railhead-postgresql-0` (2Gi).
 
-A full rebuild to all-green takes roughly 30 minutes.
+A full rebuild to all-green takes about **20 minutes on a clean network** —
+roughly 12 for pass 1, 2 for pass 2, under a minute each for passes 3 and 4, and
+5 or so for the Applications to converge. Budget 30 if the link is unreliable;
+that higher figure came from a run fighting DNS failures throughout.
 
 ## If DNS fails mid-apply
 
