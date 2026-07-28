@@ -74,10 +74,21 @@ Nothing in Terraform or ArgoCD does this, and a cluster destroy removes them.
 ```
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update prometheus-community
+Remove-Item C:\temp\crds\kube-prometheus-stack -Recurse -Force -ErrorAction SilentlyContinue
 helm pull prometheus-community/kube-prometheus-stack --version 87.17.0 --untar --untardir C:\temp\crds
-kubectl apply --server-side --force-conflicts -f C:\temp\crds\kube-prometheus-stack\charts\crds\crds\
+Select-String -Path C:\temp\crds\kube-prometheus-stack\Chart.yaml -Pattern "^version:"
+kubectl apply --server-side --force-conflicts -f C:\temp\crds\kube-prometheus-stack\charts\crds\crds\crd-*.yaml
 kubectl get crd | Select-String monitoring.coreos.com
 ```
+**The printed version MUST match the pin before you apply.** If it does not, stop:
+the extract is stale and the CRDs would not match the chart ArgoCD deploys.
+
+The `Remove-Item` is not tidiness — `helm pull --untar` fails outright if the
+target directory already exists, so on any rebuild after the first it exits 1
+while the following `kubectl apply` runs anyway against the *previous* extract
+and reports success. Deleting first makes the step repeatable; printing the
+version makes the mismatch visible if it ever isn't (`known-gotchas.md` #23).
+
 **Expect ten CRDs.** Pin the same version as `kube_prometheus_stack_chart_version`
 in `terraform/modules/argocd/variables.tf` — currently **87.17.0**; the CRDs must
 match the chart ArgoCD is deploying. Why this is manual, and why the chart is told

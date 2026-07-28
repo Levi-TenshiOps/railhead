@@ -17,6 +17,11 @@ the wrong cluster. A stale kubeconfig still pointing at some other *live*
 cluster would let steps 1–4 delete namespaces there, and every command would
 report success.
 
+Know its limit: the context *name* is identical for every rebuild of this
+cluster, so this check catches pointing at the wrong cluster but cannot detect a
+stale kubeconfig aimed at a dead endpoint — it reads as correct either way. Step
+1b of `rebuild-sequence.md` is what covers that case.
+
 Confirm DNS resolves before starting; step 5 is a ~11-minute destroy.
 ```
 Resolve-DnsName iam.amazonaws.com -ErrorAction Stop | Out-Null; "DNS OK"

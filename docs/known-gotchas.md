@@ -31,6 +31,7 @@ end and keep their number permanently, even once a later entry supersedes them.
 20. [PowerShell re-quotes single-quoted arguments to native executables](#20)
 21. [A rebuild leaves kubeconfig pointing at the destroyed cluster](#21)
 22. [The network triage heuristic has a blind spot](#22)
+23. [Replacing a placeholder with a concrete path made a step silently wrong](#23)
 
 ---
 
@@ -159,4 +160,13 @@ Worth recording *how* this was found, because it explains why it stayed hidden s
 The standing triage for a `no such host` is `ping 8.8.8.8` plus a ping of the default gateway: 8.8.8.8 failing while the gateway answers means the uplink dropped (#17); both failing means the local network is down; **both succeeding** is meant to indicate a genuine DNS fault. That last branch is wrong on its own, because it silently assumes the hostname *should* resolve. When it shouldn't — a rebuilt cluster's retired endpoint (#21), a deleted load balancer, a renamed bucket — both pings succeed, DNS is working perfectly, and the rule points you at a fault that does not exist.
 
 Add a third question before concluding DNS: **does this hostname still belong to something that exists?** For an EKS endpoint, compare kubeconfig's `server` value against `aws eks describe-cluster --query cluster.endpoint`; if they differ it is stale local configuration, not a network problem. The broader habit is to check that the *name* is still valid before investigating the *resolution* of it — resolution failures against names that were correctly deleted are the expected outcome, not a symptom.
+
+<a id="23"></a>
+### 23. Replacing a placeholder with a concrete path made a step silently wrong
+
+`rebuild-sequence.md` originally wrote the Prometheus CRD bootstrap against a `<workdir>` placeholder. That was genuinely ambiguous, so it was replaced with a real path — and the concrete version was *worse*, because a reader supplies a fresh directory each time while a hard-coded one accumulates. `helm pull --untar` refuses to extract into a directory that already exists, so on every rebuild after the first it exited 1 — and the `kubectl apply` on the next line ran regardless, against the **previous** extract, reporting exit 0 and the correct count of ten CRDs. Nothing in the output indicated anything had gone wrong.
+
+It was caught only because the leftover extract happened to match the pinned chart version. Had the pin been bumped between runs, the applied CRDs would have silently diverged from the chart ArgoCD deploys — the exact version-skew failure that `crds.enabled = false` and the manual bootstrap (#14) exist to manage, reintroduced by the documentation meant to prevent it.
+
+Two lessons worth generalising. **Any command written into a procedure has to be idempotent**, because a procedure is by definition run more than once, and the second run is the one nobody tests. **Any step whose commands can fail independently needs a verification between them** — here, printing `Chart.yaml`'s version before applying, so a stale extract is visible rather than inferred. More uncomfortably: this was introduced while *fixing* a documentation gap, and shipped after a verification cycle that passed. Tightening a document is a change like any other and can regress it; "the run went green" only proves the path that ran, not the path a cold reader will take.
 </content>
