@@ -29,6 +29,8 @@ end and keep their number permanently, even once a later entry supersedes them.
 18. [`terraform -chdir` resolves file arguments relative to that directory](#18)
 19. [A namespace stuck `Terminating` waits on pods that will never report](#19)
 20. [PowerShell re-quotes single-quoted arguments to native executables](#20)
+21. [A rebuild leaves kubeconfig pointing at the destroyed cluster](#21)
+22. [The network triage heuristic has a blind spot](#22)
 
 ---
 
@@ -121,6 +123,8 @@ This repo has now been bitten by it twice — first in a Grafana dashboard JSON 
 
 And they need opposite responses. (1) *Local*: Hyper-V/WSL virtual adapters outranking the real NIC on interface metric while having no DNS servers configured — see #9. Re-metricing fixes it, and the improvement is real and measurable (one endpoint went from 0/4 to 20/20 on sustained testing). (2) *Upstream*: a WAN or ISP dropout, which fails exactly the same way and which no local change will help. Distinguish them in one command: **`ping 8.8.8.8`**. If raw ICMP to a public IP fails with DNS out of the path entirely, it is the uplink — confirm with `ping <gateway>`, which will still succeed. A dropout was observed lasting 1–2 minutes and recovering on its own, during which the *previous* resolver failed identically, proving the resolver change innocent. A flapping link is the better explanation for the sporadic, unreproducible failures that persisted across random endpoints after the metric fix, and for why pre-warming helped — it narrows the exposure window rather than fixing anything. Assume any Terraform run over ~5 minutes risks an interruption; both the rebuild and teardown procedures are resumable by design, so the correct response is to re-run the failed pass, not to start changing network settings.
 
+**The two-ping heuristic has a third case — see #22.** "Both pings succeed" is written above as meaning a genuine DNS fault, but that assumes the failing hostname *ought* to resolve. When it legitimately no longer exists — a rebuilt cluster's retired endpoint being the case that caught us — DNS is working correctly and there is nothing to fix. Check that the name is still valid before investigating resolution.
+
 <a id="18"></a>
 ### 18. `terraform -chdir` resolves file arguments relative to that directory
 
@@ -141,4 +145,18 @@ Worth knowing why `kubectl` keeps working against the cluster throughout: your w
 A single-quoted PowerShell string is literal *within PowerShell*, but when it is passed to a native `.exe` PowerShell 5.1 re-wraps it in double quotes and does **not** escape any double quotes inside it. So a jsonpath like `'{range .status.conditions[*]}{.type}{": "}{.message}{"\n"}{end}'` arrives at `kubectl` as `"{range ...}{": "}...{end}"` — the receiving argument parser splits on those inner quotes and the command fails or silently returns nothing. This is not a `kubectl` bug and it affects any native tool: `jq` filters, `aws --query` expressions containing quotes, `git log --format` strings.
 
 The reliable fix in PowerShell is to stop passing quote-bearing format strings to the tool at all and parse structured output instead: `(kubectl get ns <n> -o json | ConvertFrom-Json).status.conditions`. Where a format string is unavoidable, use the stop-parsing token `--%` or build the argument with `'` doubled. Related to #16 — both are cases where PowerShell transforms a string between what you typed and what the other program receives, and both are invisible until you inspect the bytes the other side actually got.
+
+<a id="21"></a>
+### 21. A rebuild leaves kubeconfig pointing at the destroyed cluster
+
+Every EKS cluster gets a fresh API endpoint, so a teardown-then-rebuild leaves your local kubeconfig holding the *old* cluster's hostname. Every `kubectl` command then fails with `no such host` against something like `EA0543BCFEAE884175C86D0D3060985D.gr7.us-east-1.eks.amazonaws.com`. This is not a network fault, and it is not DNS: that hostname genuinely stopped existing when the old cluster was destroyed, so the resolver is answering correctly. Confirm by comparing `kubectl config view --minify -o jsonpath="{.clusters[0].cluster.server}"` against `aws eks describe-cluster --name railhead-dev --region us-east-1 --query cluster.endpoint` — if they differ, that is the whole problem. The fix is one command: `aws eks update-kubeconfig --name railhead-dev --region us-east-1`.
+
+Worth recording *how* this was found, because it explains why it stayed hidden so long: a verification cycle that followed `rebuild-sequence.md` literally, not a code or doc review. On the two prior rebuilds the command was supplied reflexively, from habit, by whoever was driving — so both runs passed and neither exposed that no document anywhere mentioned it. Exactly the same class of defect as the manual Prometheus CRD bootstrap (#14): a mandatory step that lives only in an operator's muscle memory, and that a procedure claiming to be "verified against a real run" will keep failing to catch until someone runs it *without* the habit. The general lesson is that a procedure is only proven by executing it in a genuinely cold environment; a run by the person who wrote it proves considerably less.
+
+<a id="22"></a>
+### 22. The network triage heuristic has a blind spot
+
+The standing triage for a `no such host` is `ping 8.8.8.8` plus a ping of the default gateway: 8.8.8.8 failing while the gateway answers means the uplink dropped (#17); both failing means the local network is down; **both succeeding** is meant to indicate a genuine DNS fault. That last branch is wrong on its own, because it silently assumes the hostname *should* resolve. When it shouldn't — a rebuilt cluster's retired endpoint (#21), a deleted load balancer, a renamed bucket — both pings succeed, DNS is working perfectly, and the rule points you at a fault that does not exist.
+
+Add a third question before concluding DNS: **does this hostname still belong to something that exists?** For an EKS endpoint, compare kubeconfig's `server` value against `aws eks describe-cluster --query cluster.endpoint`; if they differ it is stale local configuration, not a network problem. The broader habit is to check that the *name* is still valid before investigating the *resolution* of it — resolution failures against names that were correctly deleted are the expected outcome, not a symptom.
 </content>

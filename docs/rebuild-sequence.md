@@ -15,9 +15,11 @@ Resolve-DnsName eks.us-east-1.amazonaws.com -ErrorAction Stop | Out-Null; "DNS O
 ```
 If that fails — or a pass dies mid-run with `no such host` — run `ping 8.8.8.8`.
 Failing means the uplink dropped: wait two minutes and retry, and change nothing
-locally. Succeeding means the fault is local. Either way read `known-gotchas.md`
-#17 before touching a network setting; both faults look identical and need
-opposite responses.
+locally. If it succeeds, ask a third question before blaming DNS: **does the
+failing hostname still exist?** A destroyed cluster's endpoint is gone, and that
+resolves-to-nothing exactly like a network fault (#21, #22). Only once the name
+is known to be valid is this a real DNS problem — see `known-gotchas.md` #17
+before touching a network setting.
 
 ## 1. Foundation and cluster — ~12 min
 ```
@@ -26,6 +28,21 @@ terraform -chdir=terraform/environments/dev apply "-target=module.vpc" "-target=
 **Expect `33 added`.** Quote the `-target` arguments — unquoted, PowerShell splits
 them and Terraform rejects the command. The EKS control plane accounts for 8–10
 minutes of that, the node group another 3.
+
+## 1b. Point kubectl at the new cluster — required before any kubectl command
+```
+aws eks update-kubeconfig --name railhead-dev --region us-east-1
+kubectl get nodes
+```
+**Expect** `Updated context arn:aws:eks:...:cluster/railhead-dev`, then `kubectl
+get nodes` to answer with two `t3.large` nodes. They may still be joining — what
+matters here is that the command responds at all, not that they are `Ready` yet.
+
+A rebuild gives the cluster a brand-new API endpoint, but kubeconfig still holds
+the *destroyed* cluster's. Until this runs, every kubectl command in this
+document and in `teardown-sequence.md` fails with `no such host` against a
+hostname that no longer exists — which looks exactly like a network fault and is
+not (`known-gotchas.md` #21).
 
 ## 2. ArgoCD alone, to install its CRDs — ~2 min
 ```

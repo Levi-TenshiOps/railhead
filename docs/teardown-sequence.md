@@ -7,15 +7,27 @@ deliberately kept — they cost pennies and rebuilding them wastes CI time.
 **Step order is load-bearing — do not reorder or skip.** The destroy in step 5
 does not carry `-auto-approve`, so it prompts; add it for non-interactive runs.
 
+**First, confirm kubectl is pointed at the cluster you actually mean to destroy.**
+```
+kubectl config current-context
+```
+It must name `railhead-dev`. This is a **safety check, not a connectivity
+check** — the danger is not that kubectl fails, it is that it succeeds against
+the wrong cluster. A stale kubeconfig still pointing at some other *live*
+cluster would let steps 1–4 delete namespaces there, and every command would
+report success.
+
 Confirm DNS resolves before starting; step 5 is a ~11-minute destroy.
 ```
 Resolve-DnsName iam.amazonaws.com -ErrorAction Stop | Out-Null; "DNS OK"
 ```
 If that fails — or a command dies mid-run with `no such host` — run `ping
 8.8.8.8`. Failing means the uplink dropped: wait two minutes and retry, and
-change nothing locally. Succeeding means the fault is local. Either way read
-`known-gotchas.md` #17 before touching a network setting; both faults look
-identical and need opposite responses.
+change nothing locally. If it succeeds, ask a third question before blaming DNS:
+**does the failing hostname still exist?** A destroyed cluster's endpoint is
+gone, and that resolves-to-nothing exactly like a network fault (#21, #22). Only
+once the name is known to be valid is this a real DNS problem — see
+`known-gotchas.md` #17 before touching a network setting.
 
 ## 1. Delete the five ArgoCD Application CRs
 So selfHeal stops recreating what the next steps remove.
@@ -77,6 +89,11 @@ exits non-zero having destroyed most resources (commonly a DNS failure on an IAM
 `DetachRolePolicy` call), re-run the identical command and it continues. Confirm
 with `terraform -chdir=terraform/environments/dev state list` rather than assuming
 the teardown failed.
+
+Use `state list`, not `plan`, for that check. After a *successful* teardown
+`terraform plan` exits 1 with five `Failed to construct REST client` errors — one
+per `kubernetes_manifest` Application, which validates against a cluster that no
+longer exists. Expected by design; it says nothing about the health of the state.
 
 If it instead fails at the very end with `Failed to persist state to backend`, the
 resources *were* destroyed but the result never reached S3. Terraform writes the
