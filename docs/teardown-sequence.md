@@ -7,6 +7,21 @@ deliberately kept — they cost pennies and rebuilding them wastes CI time.
 Order matters more than it looks like it should. Steps 2 and 4 exist because of
 failures actually hit during a real teardown, not out of caution.
 
+**Before starting, pre-resolve the AWS endpoints.** On a workstation where DNS
+resolves intermittently, the destroy in step 5 is just as exposed as a rebuild —
+one run hit `iam.amazonaws.com: no such host` three times and left four IAM
+resources behind, and another failed to write state back to S3 afterwards.
+Resolving the endpoints first makes this much less frequent:
+
+```
+$hosts = @("iam.amazonaws.com","sts.us-east-1.amazonaws.com","ec2.us-east-1.amazonaws.com",
+           "eks.us-east-1.amazonaws.com","s3.us-east-1.amazonaws.com","dynamodb.us-east-1.amazonaws.com",
+           "api.ecr.us-east-1.amazonaws.com","railhead-tfstate-993268717190.s3.us-east-1.amazonaws.com")
+foreach ($h in $hosts) { 1..5 | ForEach-Object { Resolve-DnsName $h -ErrorAction SilentlyContinue | Out-Null } }
+```
+
+See the multi-adapter DNS entry in `known-gotchas.md` for why this happens.
+
 1. **Delete the five ArgoCD Application CRs** so selfHeal stops recreating what
    the next steps remove:
    ```
@@ -62,6 +77,21 @@ failures actually hit during a real teardown, not out of caution.
    Quote the `-target` arguments in PowerShell. Unquoted, PowerShell splits them
    and Terraform rejects the command with `Invalid target "module"`.
 
+   **A partial failure is expected and recoverable.** Terraform destroy is
+   resumable — if it exits non-zero having destroyed most resources (commonly a
+   DNS failure on an IAM `DetachRolePolicy` call), re-run the identical command
+   and it continues from where it stopped. Verify with `terraform state list`
+   rather than assuming the teardown failed. One real run exited 1 having
+   destroyed 47 of 50 resources; everything billable was already gone and only
+   four free IAM objects remained.
+
+   If instead it fails at the very end with `Failed to persist state to backend`,
+   the resources *were* destroyed but the result never reached S3. Terraform
+   writes the correct state to `errored.tfstate` in the working directory and
+   tells you to run `terraform state push errored.tfstate`. Check that its
+   `lineage` matches the remote state and its `serial` is exactly one higher
+   before pushing.
+
 6. **Sweep for orphans.** Terraform reporting success is not proof that nothing
    billable survived — Kubernetes-created resources in particular are invisible
    to it:
@@ -73,10 +103,15 @@ failures actually hit during a real teardown, not out of caution.
    aws ec2 describe-nat-gateways --region us-east-1 --filter "Name=state,Values=available"
    aws eks list-clusters --region us-east-1
    aws ec2 describe-instances --region us-east-1 --filters "Name=instance-state-name,Values=running"
+   aws ec2 describe-vpcs --region us-east-1 --query "Vpcs[?!IsDefault].[VpcId,Tags[?Key=='Name'].Value|[0]]" --output table
+   aws ec2 describe-security-groups --region us-east-1 --query "SecurityGroups[?GroupName!='default'].[GroupId,GroupName]" --output table
    ```
-   All seven should come back empty. Unassociated Elastic IPs are the easiest
+   All nine should come back empty. Unassociated Elastic IPs are the easiest
    one to miss — they cost nothing while attached to a NAT Gateway and start
-   billing hourly the moment the NAT goes away.
+   billing hourly the moment the NAT goes away. The VPC and security-group
+   checks are the last two: neither costs anything on its own, but both survive
+   a partially-failed destroy and a leftover VPC will collide with the next
+   rebuild.
 
 ## If a namespace hangs in Terminating
 
