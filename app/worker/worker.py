@@ -23,7 +23,12 @@ def random_name() -> str:
 
 def do_get() -> None:
     resp = requests.get(f"{API_BASE_URL}/items", timeout=5)
-    log.info("GET /items -> %s (%d items)", resp.status_code, len(resp.json()))
+    # An error response is a JSON object, not the expected list, so only
+    # report a count when we actually got a list back -- otherwise the log
+    # line reads "1 items" for a 500, which is worse than saying nothing.
+    body = resp.json()
+    count = len(body) if isinstance(body, list) else "-"
+    log.info("GET /items -> %s (%s items)", resp.status_code, count)
 
 
 def do_post() -> None:
