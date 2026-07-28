@@ -83,6 +83,11 @@ def health():
     return {"status": "ok"}
 
 
+# Deliberately no try/except around the database calls below. A failed query
+# must surface as a 500: that is the signal the availability SLO measures and
+# the per-pod error-rate alert fires on, and it is what tells the remediator
+# which pod to quarantine. Catching it here to return a friendlier response
+# would hide exactly the failure this system is built to detect.
 @app.get("/items", response_model=list[Item])
 def list_items():
     conn = db_pool.getconn()

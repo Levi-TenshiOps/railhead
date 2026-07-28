@@ -63,8 +63,8 @@ resource "aws_subnet" "private" {
   }
 }
 
-# Single NAT Gateway shared by both private subnets. See README/chat
-# notes on the cost-vs-resilience tradeoff vs. one NAT per AZ.
+# Single NAT Gateway shared by both private subnets — see this module's
+# README for the cost-vs-resilience tradeoff against one NAT per AZ.
 resource "aws_eip" "nat" {
   domain = "vpc"
 

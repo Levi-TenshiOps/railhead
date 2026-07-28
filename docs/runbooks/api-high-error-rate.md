@@ -49,7 +49,7 @@ Automated first-response now exists for one specific, narrower alert — see bel
 
 This is a different, more specific alert than the two above: it fires when **one** pod is serving majority 5xx while its Service siblings stay healthy — the corrupted-connection-pool failure mode, not a shared dependency outage. Unlike the aggregate burn-rate alerts, this one has an automated first response: `railhead-remediator` receives it via an Alertmanager webhook and quarantines the named pod on its own, no human needed for the common case.
 
-**What "quarantined" means:** the remediator patches the pod's `app` label to `railhead-api-quarantined`. That single label change drops the pod out of both the Service's selector (traffic stops immediately) and the ReplicaSet's selector (a healthy replacement is created immediately, restoring capacity) — full mechanism in the root README's "Automated remediation: pod quarantine" section.
+**What "quarantined" means:** the remediator patches the pod's `app` label to `railhead-api-quarantined`. That single label change drops the pod out of both the Service's selector (traffic stops immediately) and the ReplicaSet's selector (a healthy replacement is created immediately, restoring capacity) — full mechanism in the root README's [Automated Remediation](../../README.md#automated-remediation) section.
 
 **What the Slack message means:** a `:hospital:` message naming the pod, with an evidence block (its recent logs, restart count, image) captured *before* the quarantine action, so you have the actual failure evidence even though the pod itself will be gone in an hour.
 
