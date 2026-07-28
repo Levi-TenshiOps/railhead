@@ -1,0 +1,4 @@
+# Test-only dependencies. Deliberately kept out of requirements.txt so the
+# Dockerfile (which copies only requirements.txt) can't pull a test framework
+# into the runtime image.
+pytest==8.3.3

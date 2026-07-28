@@ -24,6 +24,22 @@ jobs:
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      # Only the remediator has tests: it is the one service that takes an
+      # action on its own, so its safety guards are the part where a silent
+      # regression actually costs something. Gated on the matrix service so
+      # this runs once, not once per image.
+      - name: Set up Python
+        if: matrix.service == 'remediator'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run unit tests
+        if: matrix.service == 'remediator'
+        run: |
+          pip install -r app/remediator/requirements.txt -r app/remediator/requirements-dev.txt
+          python -m pytest app/remediator -q
+
       - name: Build image
         run: docker build -t railhead-${{ matrix.service }}:${{ steps.vars.outputs.sha_short }} ./app/${{ matrix.service }}
 

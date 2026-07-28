@@ -239,9 +239,29 @@ def webhook():
     }
     multi_pod = len(targets) > 1
 
-    recent = sweep_and_count()
+    # The sweep is best-effort: it only enforces the TTL and the rate limit.
+    # Failing it open (recent=0) keeps remediation working through a transient
+    # API error, at the cost of one window where the rate-limit guard is blind.
+    # Failing closed would let a single blip disable remediation entirely,
+    # which is the worse outcome for a component whose job is first response.
+    try:
+        recent = sweep_and_count()
+    except ApiException as exc:
+        log.warning("sweep failed, proceeding without TTL cleanup: %s", exc)
+        recent = 0
+
+    # One alert must not be able to sink the rest of the payload. Alertmanager
+    # groups related alerts together, so an exception on the first would
+    # otherwise silence every alert behind it -- including the Slack report,
+    # which is the only signal a human gets.
     for alert in firing:
-        handle_alert(alert, recent, multi_pod)
+        try:
+            handle_alert(alert, recent, multi_pod)
+        except Exception:
+            log.exception(
+                "alert handling failed: %s",
+                alert.get("labels", {}).get("alertname", "unknown"),
+            )
     return jsonify({"received": len(firing)}), 200
 
 
