@@ -141,4 +141,3 @@ kubectl delete pods --all -n <ns> --force --grace-period=0
 ```
 Why this rather than clearing the namespace's own finalizer, and why `kubectl`
 still reaches the cluster with every node `NotReady`: `known-gotchas.md` #19.
-</content>

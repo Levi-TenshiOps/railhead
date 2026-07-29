@@ -124,4 +124,3 @@ kubectl get pvc -A
 
 **All-green in about 20 minutes** — ~12 for step 1, ~2 for step 2, under a minute
 each for steps 3 and 4, then ~5 for the Applications to converge.
-</content>
