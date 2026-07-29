@@ -65,11 +65,13 @@ What persists between sessions is deliberately the cheap half: the S3/DynamoDB s
 
 ## Automated Remediation
 
-`railhead-api` runs 2 replicas behind one Service. Under load, one pod's `psycopg2.pool.SimpleConnectionPool` — not thread-safe, but used directly under FastAPI's threadpool — got its internal bookkeeping corrupted: every `getconn()` started raising, so that pod failed essentially every `/items` request while the healthy replica kept serving — about half the Service's traffic, with the bad pod still showing `1/1 Running` and `Ready`. Its readiness probe hits `/health`, which is deliberately database-free (checking a shared dependency there would fail every replica at once, turning partial degradation into a total outage), so Kubernetes never noticed.
+**The failure.** `railhead-api` runs 2 replicas behind one Service. One pod's Postgres connection pool got corrupted under load: `psycopg2`'s `SimpleConnectionPool` isn't thread-safe, and FastAPI calls it from a threadpool. Every `getconn()` started raising, so that pod returned 500 on every `/items` request — half the Service's traffic — while still reporting `1/1 Running` and `Ready`. Kubernetes never noticed, because the readiness probe hits `/health`, which deliberately doesn't touch the database — checking a shared dependency in a readiness probe fails every replica at once, turning partial degradation into a total outage.
 
-A better probe wouldn't have helped either: a pod failing readiness still matches the ReplicaSet's selector and still counts toward the replica total, so no replacement gets created — the service would just run at half capacity indefinitely. The only thing that reliably fixes this is changing the pod's label so it drops out of the ReplicaSet's selector entirely.
+**Why a better probe wouldn't help.** Say the probe did check Postgres. The pod would fail readiness and stop receiving traffic, but it would still match the ReplicaSet's selector and still count toward the replica total. No replacement would ever be created, and the service would sit at half capacity indefinitely. Dropping the pod out of the *selector* is the only thing that actually restores capacity.
 
-On a per-pod error-rate alert, `railhead-remediator` (`app/remediator`) does exactly that: it patches the pod's `app` label to `railhead-api-quarantined`. That one change drops it out of both the Service selector (traffic stops) and the ReplicaSet selector (a healthy replacement is created) in a single call. The broken pod keeps running, orphaned, for inspection, and is deleted after a 60-minute TTL. Three guards keep it from acting where it shouldn't: it refuses if quarantining would leave no pod serving traffic, if multiple pods are alerting at once (a shared failure, not one bad pod), or after 3 quarantines in 15 minutes (a bad deployment, not one bad pod).
+**What the remediator does.** On a per-pod error-rate alert it patches the pod's `app` label to `railhead-api-quarantined`. That one change hits two selectors at once: the Service stops routing to it, and the ReplicaSet sees itself short a pod and creates a healthy one. The broken pod keeps running, orphaned, so it can still be inspected — then it's deleted after a 60-minute TTL.
+
+**Three guards.** It refuses to act if quarantining would leave nothing serving traffic, if several pods are alerting at once (a shared failure — any replacement would be equally broken), or after 3 quarantines in 15 minutes (a bad deployment, not one bad pod). Every refusal is posted to Slack.
 
 ```mermaid
 flowchart LR
@@ -81,11 +83,11 @@ flowchart LR
     rem -->|evidence block| slack
 ```
 
-Both arrows out of Alertmanager come from a *single* receiver — every critical and warning alert reaches the remediator's webhook exactly the way it reaches Slack. What is actually safe to act on is decided in `remediate.py` (`AUTO_REMEDIATE_ALERTS`), not in Alertmanager's routing tree, so widening or narrowing what gets auto-fixed stays a one-line change in one place instead of two configs that can drift apart.
+Both arrows out of Alertmanager come from a *single* receiver: every alert reaches the remediator exactly the way it reaches Slack. What's safe to act on is decided in `remediate.py` (`AUTO_REMEDIATE_ALERTS`), not in Alertmanager's routing tree — so changing it is one line in one place, rather than two configs that can drift apart.
 
-Proven live, not just written: a real pod's DNS was broken and its Postgres connections terminated from the server side, forcing genuine 500s while `/health` kept passing. The alert fired, the pod was quarantined, a healthy replacement was scheduled, and the untouched control pod proved the fault stayed isolated. The fault-injection method — every expected-vs-actual check confirming that combination reliably produces 5xx on `/items` while readiness stays green, which is the precondition the whole design rests on — is recorded in [`docs/remediator-t2-trigger-validation.md`](docs/remediator-t2-trigger-validation.md). The quarantine itself is in the screenshots below: the Slack evidence block, the relabeled pod beside its replacement, and the EndpointSlice with the bad IP gone.
+**Proven live.** A real pod's DNS was broken and its Postgres connections killed from the server side, producing genuine 500s while `/health` stayed green. The alert fired, the pod was quarantined, a replacement was scheduled, and an untouched control pod confirmed the fault stayed isolated. The fault-injection method is recorded in [`docs/remediator-t2-trigger-validation.md`](docs/remediator-t2-trigger-validation.md); the quarantine itself is in the screenshots below.
 
-This stops the bleeding, not the disease — it doesn't fix Postgres or the network, just restores capacity and preserves evidence. Detection takes ~5 minutes end to end (scrape interval, rate window, alert hold, Alertmanager grouping); a service mesh could eject a bad endpoint faster, but would destroy the evidence in the process.
+**What it doesn't do.** This stops the bleeding, not the disease: it restores capacity and preserves evidence, but doesn't fix Postgres or the network. Detection takes ~5 minutes end to end (scrape interval, rate window, alert hold, Alertmanager grouping). A service mesh could eject a bad endpoint faster, but would destroy the evidence doing it.
 
 ## Known gotchas
 

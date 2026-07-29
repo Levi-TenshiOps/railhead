@@ -39,11 +39,12 @@ Concretely:
   I have add/commit/push solid knowledge. Explain any new command or
   concept as it comes up, so I keep building real fluency, not just
   copying commands.
-- Python: I have solid foundational programming knowledge, but I
-  haven't used Python specifically in some time. Give me a detailed
-  explanation of every step involved in Python code — not light-touch,
-  and don't assume I remember Python-specific syntax/idioms just
-  because I know programming concepts generally.
+- Python: I'm comfortable with programming generally, and Python is
+  the language I know best — it's simply been a while since I wrote
+  code regularly. Treat this as knocking the rust off, not teaching:
+  skip the concepts, and instead be precise about the syntax, idioms,
+  and standard-library details as they come up, since those are what
+  fade first. Point out anything that has changed in modern Python.
 
 ## Standing operational habits
 
