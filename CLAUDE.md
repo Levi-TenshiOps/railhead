@@ -48,47 +48,54 @@ Concretely:
 
 ## Standing operational habits
 
-- Cost discipline: destroy billable resources at the end of each
-  session. Use targeted destroys (-target=module.eks
-  -target=module.vpc) — dev was deliberately NOT split into
-  foundation/workload layers; this is the agreed approach.
-- ArgoCD manages all workloads now, so nothing gets a plain `helm
-  uninstall` anymore. Before `terraform destroy`, delete the ArgoCD
-  Application CRs first (`kubectl delete application <name> -n
-  argocd` for railhead, observability, loki, alloy — whichever are
-  deployed) so selfHeal can't fight the cleanup, then verify via
-  `kubectl get pods -A` and `kubectl get pvc -A` that everything
-  and every PVC is actually gone before destroying eks/vpc.
-- If deleting an Application CR doesn't cascade-delete its
-  workloads (no finalizer configured on that particular resource),
-  delete the underlying namespace directly instead — don't leave
-  orphaned pods/PVCs running untracked by ArgoCD.
-- Destroy module.vpc and module.eks together in the same command,
-  not sequentially. This cluster's EKS endpoint is public-only
-  (`endpoint_private_access = false`), so node-to-control-plane
-  traffic actually routes out through the NAT Gateway and back in
-  via the public endpoint. Destroying the NAT Gateway before the
-  node group breaks that path, drops nodes to NotReady, and can hang
-  any Kubernetes-API-dependent resource deletion (e.g. a namespace
-  finalizer waiting to confirm pods are gone).
-- Always show terraform plan output and wait for explicit
-  go-ahead before apply/destroy.
-- Verify every apply/destroy independently via AWS CLI, not just
-  by trusting Terraform's own report.
+- Cost discipline: destroy billable resources at the end of every
+  session. `docs/teardown-sequence.md` is authoritative and verified
+  end-to-end three times — follow it rather than working from memory,
+  and treat any deviation as a finding worth reporting.
+  `docs/rebuild-sequence.md` is the other direction; the rebuild is
+  three targeted passes plus a manual CRD bootstrap, not one command.
+- The one thing never to improvise: deleting an ArgoCD Application
+  does NOT delete what it deployed. The namespaces must be deleted
+  explicitly, or the EBS volumes orphan and bill indefinitely.
+- Verify every apply/destroy independently via AWS CLI rather than
+  trusting Terraform's own report — the nine-check orphan sweep is
+  step 6 of the teardown doc.
 - Flag screenshot moments only for things with no permanent record
-  otherwise (live console views, one-time terminal output). Things
-  like GitHub Actions runs already have permanent, linkable
-  history — link instead of screenshotting.
-- Remind me about git add/commit/push at natural checkpoints.
-  Keep infra-code commits and docs/screenshot commits separate.
-- Screenshots go in screenshots/ at the repo root, named
-  module-action.png.
+  otherwise (live console views, one-time terminal output). GitHub
+  Actions runs already have linkable history — link instead.
+- Remind me about git add/commit/push at natural checkpoints. Keep
+  infra-code commits and docs/screenshot commits separate.
+- Screenshots go in `screenshots/` at the repo root, named
+  `component-description.png` (`vpc-apply.png`,
+  `remediator-quarantine-slack.png`).
 
 ## Known project decisions (don't re-litigate these)
 
-- Kept DynamoDB-based state locking instead of migrating to
-  Terraform's newer use_lockfile — deliberate choice.
+**Infrastructure**
+- DynamoDB state locking, not Terraform's newer `use_lockfile`.
 - GitHub OIDC thumbprint showing as "changed" between plans is
   expected CDN-cert churn, not a real problem.
-- GitHub Actions trust policy is scoped to
-  repo:Levi-TenshiOps/railhead:ref:refs/heads/main.
+- Trust policy is scoped to
+  `repo:Levi-TenshiOps/railhead:ref:refs/heads/main`.
+- **The repo is PUBLIC.** ArgoCD's PAT is kept anyway — authenticated
+  GitHub rate limits, and flipping back to private never breaks the
+  deploy path. The hardcoded AWS account ID is fine for the same
+  reason.
+- Single dev environment, deliberately not multi-environment.
+- Prometheus CRDs bootstrapped manually with `crds.enabled = false`
+  (known-gotchas #14). ECR tagged-image retention is 100.
+
+**Application**
+- `/health` is DB-free by design, and both SLOs exclude it.
+- The remediator's `/webhook` has no auth (ClusterIP, in-cluster
+  caller only). Its guards are not lock-protected and don't need to
+  be: Alertmanager's `group_by = ["namespace", "alertname"]` puts
+  every per-pod alert in one group and delivers one notification per
+  group at a time, so two actionable requests never arrive at once.
+  Note Flask's `app.run()` defaults to `threaded=True` — the safety
+  comes from Alertmanager's grouping, not from the server being
+  single-threaded. Adding `pod` to `group_by` would break that.
+- ArgoCD Applications carry no cascade finalizer — considered and
+  rejected (known-gotchas #7).
+- Image tags are bumped by hand and CI has no path filtering, so all
+  three images rebuild on every push. Both are documented debt.
