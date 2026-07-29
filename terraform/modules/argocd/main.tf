@@ -109,10 +109,16 @@ resource "helm_release" "argocd" {
 
 # ArgoCD auto-discovers repo credentials from any Secret in its namespace
 # carrying this exact label — no separate `argocd repo add` step needed.
-# The railhead repo is private, so without this ArgoCD can't clone it at
-# all (a long-lived controller polling git isn't the same auth model as
-# the GitHub Actions OIDC federation built earlier — that's scoped to
-# GitHub Actions runs specifically, not usable here).
+# This was mandatory while the railhead repo was private. The repo is
+# public now, so ArgoCD could clone anonymously, but the credential is
+# kept deliberately: it costs nothing, it keeps ArgoCD on authenticated
+# GitHub rate limits rather than the much lower anonymous ones for a
+# controller that polls git every few minutes, and it means flipping the
+# repo back to private never silently breaks the deploy path.
+#
+# Note this is a different auth model from the GitHub Actions OIDC
+# federation built earlier — that is scoped to Actions runs specifically
+# and is not usable by a long-lived in-cluster controller.
 resource "kubernetes_secret_v1" "repo_credentials" {
   metadata {
     name      = "railhead-repo-credentials"
@@ -298,9 +304,9 @@ resource "kubernetes_manifest" "observability_application" {
             # to confirm the pipeline itself is alive, not a real problem)
             # goes to the single Slack receiver below. severity=critical
             # and severity=warning share one receiver/channel rather than
-            # two, since Step 3 asked for a single glance-able channel with
-            # visually distinct formatting per severity instead of separate
-            # channels.
+            # two: one channel you actually watch beats two you learn to
+            # ignore, and the formatting below makes severity readable at a
+            # glance without needing separate destinations.
             alertmanager = {
               enabled = true
 
@@ -818,7 +824,7 @@ resource "kubernetes_manifest" "loki_application" {
 
             # No multi-tenancy needed for a single-app portfolio cluster.
             # Optional caching/canary sidecars disabled to keep this lean
-            # on a 2x t3.medium cluster already running quite a lot.
+            # on a 2x t3.large cluster already running quite a lot.
             # test.enabled must come down with lokiCanary: the chart's own
             # validate.yaml refuses canary-less Helm test hooks, and ArgoCD
             # doesn't invoke `helm test` in this GitOps setup anyway.
