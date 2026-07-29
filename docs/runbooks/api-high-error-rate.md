@@ -11,7 +11,7 @@ The `railhead-api` availability SLO is 99% of requests non-5xx over a rolling 30
 
 Both windows (long + short) have to agree before the alert fires — this is deliberate. It means the alert clears on its own within minutes of the underlying problem actually stopping, rather than staying lit for up to an hour just because the long window still remembers the bad data. If you see this alert, the error rate is (or very recently was) genuinely elevated right now, not a stale echo of something already fixed.
 
-Only 5xx counts as "bad" here — 4xx (bad client requests) is deliberately excluded, since it doesn't represent the service failing to do its job.
+Only 5xx counts as "bad" here — 4xx (bad client requests) is deliberately excluded, since it doesn't represent the service failing to do its job. `/health` is excluded too: readiness probes it every 5s and liveness every 10s, so probe traffic outnumbers real requests roughly 6:1 and never fails. Counting it would dilute the error ratio about 7x and hide real outages.
 
 ## First things to check
 
@@ -40,18 +40,14 @@ Only 5xx counts as "bad" here — 4xx (bad client requests) is deliberately excl
 **Escalate to a human if:** (these aggregate burn-rate alerts have no automated response — see the pod-quarantine section below for the one alert that does)
 - The cause isn't obvious within a few minutes of checking the dashboard + Loki + pod status above.
 - Postgres data itself looks wrong or missing (not just unreachable) — don't guess at a fix that touches data.
-- The critical alert has been firing for more than ~15 minutes with no clear cause identified — at the 14.4x burn rate, that's already a meaningful chunk of the monthly error budget gone.
+- The critical alert has been firing for more than ~15 minutes with no clear cause identified — at the 14.4x burn rate you're spending budget about 14x faster than the SLO allows, and every further hour costs ~2% of the month's allowance.
 - Fixing it would require touching Terraform/infra (not just `kubectl`) — e.g. the EKS node group, IAM, or anything outside the `railhead` namespace.
-
-Automated first-response now exists for one specific, narrower alert — see below. It does not cover the aggregate SLO burn-rate alerts this runbook is otherwise about; those still need a human every time, for the reasons in "Self-resolve vs. escalate" above.
 
 ## Automated response: `RailheadAPIPodErrorRate` (pod quarantine)
 
-This is a different, more specific alert than the two above: it fires when **one** pod is serving majority 5xx while its Service siblings stay healthy — the corrupted-connection-pool failure mode, not a shared dependency outage. Unlike the aggregate burn-rate alerts, this one has an automated first response: `railhead-remediator` receives it via an Alertmanager webhook and quarantines the named pod on its own, no human needed for the common case.
+A different, narrower alert than the two above: it fires when a pod serves majority 5xx on non-health-check requests. The expression is per-pod and does **not** compare replicas — one pod firing alone is the corrupted-connection-pool case; several firing at once is a shared outage. The remediator makes that distinction itself, because Alertmanager hands it every firing alert in one payload. Unlike the burn-rate alerts, this one has an automated first response: `railhead-remediator` quarantines the named pod, no human needed for the common case.
 
-**What "quarantined" means:** the remediator patches the pod's `app` label to `railhead-api-quarantined`. That single label change drops the pod out of both the Service's selector (traffic stops immediately) and the ReplicaSet's selector (a healthy replacement is created immediately, restoring capacity) — full mechanism in the root README's [Automated Remediation](../../README.md#automated-remediation) section.
-
-**What the Slack message means:** a `:hospital:` message naming the pod, with an evidence block (its recent logs, restart count, image) captured *before* the quarantine action, so you have the actual failure evidence even though the pod itself will be gone in an hour.
+**What you'll see:** a `:hospital:` Slack message naming the pod, with an evidence block (recent logs, restart count, image) captured *before* the action, so the failure evidence survives the pod. "Quarantined" means its `app` label was patched to `railhead-api-quarantined`, dropping it out of the Service selector (traffic stops) and the ReplicaSet selector (a replacement is created) — full mechanism in the root README's [Automated Remediation](../../README.md#automated-remediation) section.
 
 **Reading the follow-up `resolved` alert:** once the pod is quarantined, it stops receiving traffic and Prometheus stops scraping it, so the per-pod error-rate series it was firing on simply disappears — Alertmanager reports this as the alert resolving. **A `resolved` notification here means the quarantine worked, not that the underlying problem fixed itself.** Don't read it as "safe to ignore" the way you would for a burn-rate alert that cleared because traffic actually recovered.
 
