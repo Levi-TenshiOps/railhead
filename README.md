@@ -93,7 +93,7 @@ Both arrows out of Alertmanager come from a *single* receiver: every alert reach
 
 CloudWatch Container Insights runs alongside Prometheus and Grafana rather than replacing them. Two monitoring systems only earn their keep if they see different things — these do.
 
-**What only CloudWatch can see.** EKS runs the control plane, so there's nothing for Prometheus to scrape. Turning on API and audit logging surfaces API-server and etcd metrics, plus an audit trail of exactly which ServiceAccount called what — which makes RBAC checkable from outside the cluster instead of taken on trust.
+**What only CloudWatch can see.** AWS operates the control plane. The API server itself is scrapable — this cluster scrapes it — but `kube-scheduler`, `kube-controller-manager`, and etcd are not, which is why those scrape jobs are disabled rather than left permanently down. The audit log is out of reach entirely: Prometheus collects metrics, not a per-request record of which ServiceAccount called what. That record is what makes RBAC checkable from outside the cluster instead of taken on trust.
 
 **Watching the watcher.** The remediator watches `railhead-api`, and until now nothing watched the remediator — a real gap rather than a theoretical one, since it runs a single replica and a single replica that dies stays dead. Prometheus can't close it: Prometheus and Alertmanager run in the same cluster and can't reliably alert on a failure that takes them down too. A CloudWatch alarm on the remediator's pod count can, because it sits outside the cluster and survives what it reports on. It treats missing data as breaching — a pod that disappears stops publishing rather than reporting zero, and the default would leave the alarm silent for exactly the failure it exists to catch.
 
@@ -240,22 +240,22 @@ Grafana's error-rate panel, showing the fault's entire lifecycle: a clean spike 
 <details>
 <summary><b>AWS-native monitoring — CloudWatch (6 screenshots)</b></summary>
 
-Container Insights overview, with the alarm rows populated rather than reading "No alarms detected":
+Container Insights overview. The Cluster and Service rows now read `2 OK` and `1 OK`; the other resource types have no alarms targeting them, so they still show "No alarms detected":
 ![CloudWatch Container Insights overview for the railhead-dev cluster](screenshots/cloudwatch-container-insights.png)
 
 All three alarms in `OK`, none carrying a notification action:
 ![CloudWatch alarms list showing all three railhead-dev alarms OK](screenshots/cloudwatch-alarms.png)
 
-Both log groups at 1-day retention and Terraform-managed — the fix for never-expiring groups outliving `terraform destroy`:
+Both log groups at 1-day retention — the fix for never-expiring groups outliving `terraform destroy`. Terraform owns them, which is what makes the retention stick and what removes them at teardown:
 ![CloudWatch log groups showing both railhead groups at 1 day retention](screenshots/cloudwatch-log-groups-retention.png)
 
-`apiserver_storage_size_bytes` graphed — etcd object storage, a control-plane metric Prometheus cannot scrape on managed EKS:
+`apiserver_storage_size_bytes` graphed — etcd object storage, flat at 28.27 MB across the window, and the metric the growth alarm watches:
 ![CloudWatch metrics graph of apiserver_storage_size_bytes](screenshots/cloudwatch-apiserver-storage.png)
 
-Least-privilege proven from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and the audit log shows exactly one was ever exercised: `list pods`, twice, in `railhead`. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
+Least-privilege, checked from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and the audit log shows exactly one was ever exercised: `list pods`, twice, in `railhead`. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
 ![Logs Insights query showing the remediator ServiceAccount made only list-pods calls](screenshots/cloudwatch-logs-insights-least-privilege.png)
 
-Top API-server callers over ~90 minutes. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each and are invisible to Prometheus on managed EKS:
+Top API-server callers over a 3-hour window. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each, and neither is scraped by Prometheus here — AWS exposes no metrics endpoint for them:
 ![Logs Insights query ranking API server callers by request count](screenshots/cloudwatch-logs-insights-top-callers.png)
 
 </details>

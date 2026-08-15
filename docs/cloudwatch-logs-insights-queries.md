@@ -24,11 +24,15 @@ Three alarms, none with a notification action — Alertmanager owns routing:
 
 ## Why the audit log matters
 
-On managed EKS, AWS operates the control plane and exposes no scrapeable
-endpoint, so `kube-scheduler`, `kube-controller-manager`, and the API server
-itself are invisible to Prometheus. The audit log is the only place that
-activity is visible — which makes it the clearest thing CloudWatch adds here
-rather than duplicates.
+AWS operates the control plane. The API server exposes a scrapeable `/metrics`
+endpoint and this cluster does scrape it, but `kube-scheduler`,
+`kube-controller-manager`, and etcd do not — which is why those three scrape
+jobs are disabled in `terraform/modules/argocd/main.tf` rather than left
+permanently down.
+
+The audit log is a different matter: it is not a metrics endpoint at all, so
+Prometheus cannot collect it in any configuration. That makes it the clearest
+thing CloudWatch adds here rather than duplicates.
 
 It also makes RBAC checkable. A `Role` manifest states what a workload *may*
 do; the audit log records what it actually did.
@@ -44,7 +48,7 @@ once the cluster has generated some traffic.
 
 ---
 
-## 1. Least privilege, proven from outside the cluster
+## 1. Least privilege, checked from outside the cluster
 
 ```
 fields @timestamp, verb, objectRef.resource, objectRef.namespace, responseStatus.code
@@ -53,11 +57,11 @@ fields @timestamp, verb, objectRef.resource, objectRef.namespace, responseStatus
 | limit 20
 ```
 
-Captured 2026-08-15, ~90 minutes of uptime:
+Captured 2026-08-15 over a 3-hour window — `Showing 2 of 2 matched`:
 
 ```
-2026-08-15 01:21:06.403  |  list  |  pods  |  railhead  |  200
-2026-08-15 00:13:25.689  |  list  |  pods  |  railhead  |  200
+2026-08-15T01:21:06.403Z  |  list  |  pods  |  railhead  |  200
+2026-08-15T00:13:25.689Z  |  list  |  pods  |  railhead  |  200
 ```
 
 The remediator's `Role` grants `get/list/patch/delete` on pods, `get` on
@@ -85,29 +89,35 @@ fields @timestamp, user.username
 | limit 15
 ```
 
-73,170 records scanned over ~90 minutes:
+Captured over a 3-hour window — `Showing 15 of 108,272 matched`, 112,961
+records (178.3 MB) scanned:
 
 ```
-system:serviceaccount:kube-system:ebs-csi-controller-sa      9032
-system:anonymous                                             7560
-system:kube-controller-manager                               6403
-system:kube-scheduler                                        5336
-system:apiserver                                             5114
-eks:k8s-metrics                                              4786
-eks:cloud-controller-manager                                 4423
-eks:network-policy-controller                                2928
-eks:coredns-autoscaler                                       2823
-system:serviceaccount:amazon-cloudwatch:cloudwatch-agent     2463
-system:serviceaccount:argocd:argocd-application-controller   2340
-eks:vpc-resource-controller                                  1942
-system:node:ip-10-0-11-50.ec2.internal                       1898
-eks:az-poller                                                1890
-eks:certificate-controller                                   1831
+system:serviceaccount:kube-system:ebs-csi-controller-sa      12814
+system:anonymous                                             10836
+system:kube-controller-manager                                9419
+system:apiserver                                              8099
+system:kube-scheduler                                         7869
+eks:k8s-metrics                                               6881
+eks:cloud-controller-manager                                  6388
+system:serviceaccount:argocd:argocd-application-controller    5211
+eks:network-policy-controller                                 4223
+eks:coredns-autoscaler                                        4079
+system:node:ip-10-0-11-50.ec2.internal                        3191
+system:serviceaccount:amazon-cloudwatch:cloudwatch-agent      3011
+system:node:ip-10-0-10-74.ec2.internal                        2916
+eks:vpc-resource-controller                                   2807
+system:serviceaccount:monitoring:alloy                        2712
 ```
 
 `kube-scheduler` and `kube-controller-manager` sit near the top with thousands
-of calls each, and neither can be scraped by Prometheus on this cluster. This
-is the single clearest demonstration of the capability gap CloudWatch fills.
+of calls each, and neither is scraped by Prometheus on this cluster — their
+scrape jobs are disabled because AWS exposes no endpoint for them. The API
+server above them *is* scraped, so the gap CloudWatch fills here is those two
+plus etcd, not the control plane wholesale.
+
+Counts are specific to this window and grow with uptime; the ordering below the
+top few also shifts between runs. Treat them as a shape, not a benchmark.
 
 Also useful as a baseline before chaos work: on an idle cluster the EBS CSI
 controller is the busiest caller, and the remediator doesn't appear at all.
