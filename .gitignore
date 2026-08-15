@@ -22,6 +22,11 @@ venv/
 # AWS
 .aws/
 
+# Personal interview prep — deliberately never committed. Lives outside the
+# repo, in "SRE project study guides and extra info". This entry exists so a
+# stray docs/interview/ can never be added back by accident.
+docs/interview/
+
 # Editor / OS
 .vscode/
 .idea/
