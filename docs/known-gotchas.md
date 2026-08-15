@@ -32,6 +32,10 @@ end and keep their number permanently, even once a later entry supersedes them.
 21. [A rebuild leaves kubeconfig pointing at the destroyed cluster](#21)
 22. [The network triage heuristic has a blind spot](#22)
 23. [Replacing a placeholder with a concrete path made a step silently wrong](#23)
+24. [`helm repo list` reports repos whose indexes no longer exist](#24)
+25. [CloudWatch log groups outlive `terraform destroy`](#25)
+26. [An IRSA annotation does not reach pods that already exist](#26)
+27. [`Get-Date -UFormat %s` returns local-time epoch, not UTC](#27)
 
 ---
 
@@ -149,6 +153,19 @@ A single-quoted PowerShell string is literal *within PowerShell*, but when it is
 
 The reliable fix in PowerShell is to stop passing quote-bearing format strings to the tool at all and parse structured output instead: `(kubectl get ns <n> -o json | ConvertFrom-Json).status.conditions`. Where a format string is unavoidable, use the stop-parsing token `--%` or build the argument with `'` doubled. Related to #16 — both are cases where PowerShell transforms a string between what you typed and what the other program receives, and both are invisible until you inspect the bytes the other side actually got.
 
+**Four more instances hit in a single session**, worth listing because each looked like a different bug and each is the same one:
+
+| Command | Symptom |
+|---|---|
+| `terraform plan -target=module.eks` unquoted | `Too many command line arguments` **and** `Invalid target "module"` — the argument was split on the `.` boundary |
+| `kubectl get pod -o jsonpath=...(@.name=="AWS_ROLE_ARN")...` | `unrecognized identifier AWS_ROLE_ARN`, then a full object dump instead of one field |
+| `aws logs start-query --query-string '... = "system:serviceaccount:..."'` | `MalformedQueryException: unexpected symbol found :` — the quotes vanished, so Logs Insights parsed the ServiceAccount's colons as syntax |
+| `kubectl exec -- python -c '...requests.post("http://...")...'` | `SyntaxError: invalid syntax` — Python received the URL unquoted |
+
+Three general escapes, in order of preference. **Pass the payload as a file** — `--query-string "file://$env:TEMP\q.txt"`, or `kubectl patch --patch-file`, which `rebuild-sequence.md` step 5 already does for this reason. **Pipe it via stdin** — `$script | kubectl exec -i ... -- python -` sidesteps argument parsing completely and was what finally worked for the Python case. **Quote the whole argument at the PowerShell level** — `"-target=module.eks"` — which works for simple values with no inner quotes.
+
+Note that assigning to a variable first does *not* help. `$py = 'requests.post("http://x")'` still loses its inner quotes when passed to a native command, because the re-quoting happens at invocation, not at assignment.
+
 <a id="21"></a>
 ### 21. A rebuild leaves kubeconfig pointing at the destroyed cluster
 
@@ -173,3 +190,60 @@ It was caught only because the leftover extract happened to match the pinned cha
 Fixed: step 4 of `rebuild-sequence.md` now deletes the extract directory before pulling, and prints `Chart.yaml`'s version so a stale one is visible rather than assumed. Both were verified by running the sequence twice in a row from a dirty working directory.
 
 Two lessons worth generalising. **Any command written into a procedure has to be idempotent**, because a procedure is by definition run more than once, and the second run is the one nobody tests. **Any step whose commands can fail independently needs a verification between them** — here, printing `Chart.yaml`'s version before applying, so a stale extract is visible rather than inferred. More uncomfortably: this was introduced while *fixing* a documentation gap, and shipped after a verification cycle that passed. Tightening a document is a change like any other and can regress it; "the run went green" only proves the path that ran, not the path a cold reader will take.
+
+<a id="24"></a>
+### 24. `helm repo list` reports repos whose indexes no longer exist
+
+Step 2 of `rebuild-sequence.md` failed outright with `Unable to locate chart argo-cd: no cached repo found`. `helm repo list` showed all four repositories registered and looked entirely healthy. The cache directory was empty.
+
+The split is the whole problem: the repo *list* lives in `%APPDATA%\helm\repositories.yaml` and persists indefinitely, while the downloaded *indexes* live in `%TEMP%\helm\repository` — which Windows disk cleanup purges. So `helm repo list` keeps reporting four repositories long after none of them are usable, and the Terraform `helm` provider, which reads the index rather than the list, fails on the first chart it tries to resolve. The error names `bitnami-index.yaml` regardless of which chart you asked for, because the provider enumerates every configured repo before giving up.
+
+It is also **time-dependent**, which is why three verified cycles never caught it: rebuild soon after the previous session and the cache is still warm; rebuild after cleanup has run and step 2 fails. Nothing about the procedure changed between the runs that worked and the run that didn't.
+
+Fixed: `rebuild-sequence.md` now runs `helm repo update` before step 2, not only inside step 4.
+
+**This is the third instance of one pattern**, and it is worth naming as a pattern rather than three separate bugs. The Alloy empty-`ClusterRole` default, the stale kubeconfig pointing at a destroyed endpoint (#21), and this all share a signature: **the system reports healthy and silently does nothing.** In each case the status command answers from a different source than the one doing the work — `helm repo list` reads the list, not the indexes; kubeconfig holds a context name, not a reachable endpoint; a ClusterRole exists but grants nothing. The generalisable check is to verify against *what the component actually consumes*, never against the thing that merely describes it.
+
+<a id="25"></a>
+### 25. CloudWatch log groups outlive `terraform destroy`
+
+`enabled_cluster_log_types` on `aws_eks_cluster` makes EKS create `/aws/eks/<cluster>/cluster` itself during cluster creation. That group is not a Terraform resource, defaults to **never expire**, and `terraform destroy` does not touch it. Found holding **1.51 GB** of audit and API-server logs dating to 2026-07-11, the day the cluster was first built — accumulated across every session since, surviving three teardowns that were each verified as clean. The nine-check sweep had no log-group check, so nothing ever looked.
+
+Container Insights has the same shape for a different reason: it publishes metrics as embedded metric format *through CloudWatch Logs*, so `/aws/containerinsights/<cluster>/performance` exists even with container log shipping disabled, and it too defaults to never-expire if the agent creates it.
+
+Fixed by declaring both groups in `module.eks` with `retention_in_days = 1`, and — this part is load-bearing — making the consumer depend on the group:
+
+- `aws_eks_cluster` **must** `depends_on` its log group. Terraform destroys in reverse dependency order; without this the group is deleted while the cluster still exists and EKS immediately recreates it, now unmanaged, to outlive the cluster as a fresh orphan.
+- `aws_eks_addon.cloudwatch_observability` **must** `depends_on` the Container Insights group for exactly the same reason — the agent is still running when the group is removed.
+
+Verified on a real rebuild: Terraform created the group first, EKS found it and used it rather than creating its own, and the apply reported `0 changed` on the cluster — confirming the cluster was *created* with logging already enabled rather than created and then updated.
+
+The 1-day retention is a backstop, not the fix. If ordering ever breaks anyway, a survivor self-deletes within a day instead of billing forever — but it should still be reported as a finding, because its existence means the ordering broke.
+
+The broader lesson is about verification rather than CloudWatch: **a procedure only verifies what it checks for.** Three consecutive teardowns were confirmed clean against nine checks while a tenth category of resource accumulated 1.51 GB in plain sight.
+
+<a id="26"></a>
+### 26. An IRSA annotation does not reach pods that already exist
+
+Setting `service_account_role_arn` on an `aws_eks_addon` after the add-on is installed annotates the ServiceAccount correctly, and Terraform reports success. The running pods do not get IRSA. The `cloudwatch-agent` pods stayed `1/1 Running` with no `AWS_ROLE_ARN`, no `aws-iam-token` volume, and zero metrics published.
+
+The reason is that IRSA is injected by a **mutating admission webhook**, which runs at pod admission. Annotating the ServiceAccount changes what *future* pods receive; it cannot retrofit an existing pod, because the projected token volume and the `AWS_*` environment variables are part of the pod spec that was already admitted. `kubectl rollout restart` is required.
+
+What makes this dangerous rather than merely annoying is the failure mode. Without IRSA the AWS SDK falls back to the node instance role, which in this project deliberately carries no CloudWatch permissions — so the agent authenticates as `assumed-role/railhead-dev-eks-node-role`, is denied, and drops every datapoint while reporting healthy:
+
+```
+AccessDeniedException: User: arn:aws:sts::<acct>:assumed-role/railhead-dev-eks-node-role/i-...
+is not authorized to perform: logs:PutLogEvents ... because no identity-based policy allows
+the logs:PutLogEvents action
+```
+
+968 metric datapoints rejected per flush, pods `Running`, add-on `ACTIVE`, Terraform green.
+
+A from-scratch rebuild is unaffected, because the add-on and the role are created in the same apply and the pods are admitted afterwards. Only a *later* change to IRSA — adding it, or repointing it at a different role — needs the restart. Worth checking `AWS_ROLE_ARN` is present in the pod spec rather than trusting the ServiceAccount annotation, which is the fourth instance of the #24 pattern: the annotation describes intent, the pod spec is what the SDK actually consumes.
+
+<a id="27"></a>
+### 27. `Get-Date -UFormat %s` returns local-time epoch, not UTC
+
+`aws logs start-query` takes Unix timestamps. Building them with `[int][double]::Parse((Get-Date -UFormat %s))` produced a window six hours off — the local UTC offset — and the API rejected it with `Query's end date and time is either before the log groups creation time or exceeds the log groups log retention settings`, which reads like a retention misconfiguration rather than a clock problem.
+
+PowerShell 5.1's `-UFormat %s` formats the *local* time as though it were UTC. Use `[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()` instead, which is unambiguous and needs no parsing.

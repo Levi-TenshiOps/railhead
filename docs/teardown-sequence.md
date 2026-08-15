@@ -124,12 +124,25 @@ aws eks list-clusters --region us-east-1
 aws ec2 describe-instances --region us-east-1 --filters "Name=instance-state-name,Values=running"
 aws ec2 describe-vpcs --region us-east-1 --query "Vpcs[?!IsDefault].[VpcId,Tags[?Key=='Name'].Value|[0]]" --output table
 aws ec2 describe-security-groups --region us-east-1 --query "SecurityGroups[?GroupName!='default'].[GroupId,GroupName]" --output table
+aws logs describe-log-groups --region us-east-1 --query "logGroups[?contains(logGroupName,'railhead') || contains(logGroupName,'containerinsights') || contains(logGroupName,'application-signals')].[logGroupName,retentionInDays]" --output table
 ```
-**Expect all nine empty.** Unassociated Elastic IPs are the easiest to miss — free
+**Expect all ten empty.** Unassociated Elastic IPs are the easiest to miss — free
 while attached to a NAT Gateway, billed hourly the moment the NAT goes away. The
 VPC and security-group checks are last for a reason: neither costs anything on its
 own, but both survive a partially-failed destroy, and a leftover VPC will collide
 with the next rebuild.
+
+Check ten is deliberately matched on *substrings* rather than the two prefixes we
+happen to create today. The point is catching groups nothing anticipated —
+Container Insights can emit under `application`, `host`, `dataplane`, or
+`application-signals` depending on which add-on features are enabled, and a check
+that only confirms the groups already known about would have found nothing wrong
+for three straight cycles. It did: `/aws/eks/railhead-dev/cluster` accumulated
+**1.51 GB** of never-expiring audit logs across every session since 2026-07-11,
+invisible because no sweep step looked for log groups at all. Both groups are now
+Terraform-managed with 1-day retention, so a survivor self-deletes within a day —
+**report it as a finding anyway.** A survivor means destroy ordering broke, and the
+retention is only the backstop.
 
 ## If a namespace hangs in Terminating
 Expected if the NAT Gateway is already gone. A `NamespaceDeletionContentFailure`

@@ -89,6 +89,18 @@ Both arrows out of Alertmanager come from a *single* receiver: every alert reach
 
 **What it doesn't do.** This stops the bleeding, not the disease: it restores capacity and preserves evidence, but doesn't fix Postgres or the network. Detection takes ~5 minutes end to end (scrape interval, rate window, alert hold, Alertmanager grouping). A service mesh could eject a bad endpoint faster, but would destroy the evidence doing it.
 
+## AWS-native monitoring
+
+CloudWatch Container Insights runs alongside Prometheus and Grafana rather than replacing them. Two monitoring systems only earn their keep if they see different things — these do.
+
+**What only CloudWatch can see.** EKS runs the control plane, so there's nothing for Prometheus to scrape. Turning on API and audit logging surfaces API-server and etcd metrics, plus an audit trail of exactly which ServiceAccount called what — which makes RBAC checkable from outside the cluster instead of taken on trust.
+
+**Watching the watcher.** The remediator watches the API, and nothing watched the remediator. It runs a single replica, and Prometheus can't reliably alert on a failure inside its own cluster. A CloudWatch alarm on the remediator's pod count closes that, because it sits outside the cluster and survives what it reports on. It treats missing data as breaching: a pod that disappears stops publishing rather than reporting zero, and the default would leave the alarm silent for exactly the failure it exists to catch.
+
+**Three alarms, no pager.** Remediator down, node disk over 80% (kubelet starts evicting around 90%), and etcd growth past 100 MB against a 27 MB baseline. None of them notify — Alertmanager already owns routing, and a second delivery path is a second thing that can drift.
+
+**Logs stay in Loki.** Container log shipping is off, along with the add-on's own kube-state-metrics and node-exporter, both of which would have duplicated what's already running.
+
 ## Known gotchas
 
 Real problems hit while building this, kept in [`docs/known-gotchas.md`](docs/known-gotchas.md) rather than quietly fixed and forgotten.
