@@ -56,6 +56,12 @@ Do it now, while the cluster is still healthy. The EBS CSI controller runs
 destroy the cluster with PVCs still bound and nothing ever issues `DeleteVolume`,
 so the volumes orphan and bill indefinitely (`known-gotchas.md` #7).
 
+**Leave `amazon-cloudwatch` alone.** It holds the CloudWatch agent DaemonSet, but
+unlike these two it is created by a Terraform-managed EKS add-on rather than by an
+ArgoCD Application, so step 5 removes it. Verified: the add-on destroys in about
+14 seconds and does not reproduce the finalization hang that makes `argocd` need
+step 4.
+
 ## 3. Verify the PVCs are gone and the volumes were released
 ```
 kubectl get pvc -A

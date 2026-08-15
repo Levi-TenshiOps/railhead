@@ -25,9 +25,9 @@ before touching a network setting.
 ```
 terraform -chdir=terraform/environments/dev apply "-target=module.vpc" "-target=module.iam" "-target=module.ecr" "-target=module.eks"
 ```
-**Expect `33 added`.** Quote the `-target` arguments — unquoted, PowerShell splits
-them and Terraform rejects the command. The EKS control plane accounts for 8–10
-minutes of that, the node group another 3.
+**Expect `34 added`.** Quote the `-target` arguments — unquoted, PowerShell splits
+them and Terraform rejects the command with `Invalid target "module"`. The EKS
+control plane accounts for 8–10 minutes of that, the node group another 3.
 
 ## 1b. Point kubectl at the new cluster — required before any kubectl command
 ```
@@ -45,7 +45,16 @@ hostname that no longer exists — which looks exactly like a network fault and 
 not (`known-gotchas.md` #21).
 
 ## 2. ArgoCD alone, to install its CRDs — ~2 min
+
+**Refresh the helm repo indexes first.** The `helm` provider resolves the chart
+from a cached index, not from the repo list, and the cache lives in
+`%TEMP%\helm\repository` where Windows cleanup deletes it. `helm repo list` keeps
+reporting all four repos regardless, so this fails as
+`Unable to locate chart argo-cd: no cached repo found` while everything looks
+configured. It is time-dependent — fine on a rebuild soon after the last one,
+broken once cleanup has run (`known-gotchas.md` #24).
 ```
+helm repo update
 terraform -chdir=terraform/environments/dev apply "-target=module.argocd.helm_release.argocd"
 kubectl get crd | Select-String argoproj
 ```
@@ -77,9 +86,15 @@ helm repo update prometheus-community
 Remove-Item C:\temp\crds\kube-prometheus-stack -Recurse -Force -ErrorAction SilentlyContinue
 helm pull prometheus-community/kube-prometheus-stack --version 87.17.0 --untar --untardir C:\temp\crds
 Select-String -Path C:\temp\crds\kube-prometheus-stack\Chart.yaml -Pattern "^version:"
-kubectl apply --server-side --force-conflicts -f C:\temp\crds\kube-prometheus-stack\charts\crds\crds\crd-*.yaml
+kubectl apply --server-side --force-conflicts -f C:\temp\crds\kube-prometheus-stack\charts\crds\crds
 kubectl get crd | Select-String monitoring.coreos.com
 ```
+
+Pass the **directory**, not a `crd-*.yaml` glob. PowerShell does not expand globs
+for native commands, so kubectl receives the literal `crd-*.yaml` and fails with
+`The filename, directory name, or volume label syntax is incorrect` — the glob
+form has never worked as written on this shell (`known-gotchas.md` #20). Every
+file in that directory is a CRD, so the directory form is equivalent.
 **The printed version MUST match the pin before you apply.** If it does not, stop:
 the extract is stale and the CRDs would not match the chart ArgoCD deploys.
 
