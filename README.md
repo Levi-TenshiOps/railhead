@@ -101,6 +101,8 @@ CloudWatch Container Insights runs alongside Prometheus and Grafana rather than 
 
 **Logs stay in Loki.** Container log shipping is off, along with the add-on's own kube-state-metrics and node-exporter, both of which would have duplicated what's already running.
 
+Reusable Logs Insights queries, with captured output, are in [`docs/cloudwatch-logs-insights-queries.md`](docs/cloudwatch-logs-insights-queries.md).
+
 ## Known gotchas
 
 Real problems hit while building this, kept in [`docs/known-gotchas.md`](docs/known-gotchas.md) rather than quietly fixed and forgotten.
@@ -232,5 +234,28 @@ EndpointSlice after quarantine: only the two healthy pod IPs remain — the quar
 
 Grafana's error-rate panel, showing the fault's entire lifecycle: a clean spike as the fault took hold, holding while the pod kept serving broken traffic, then a sharp drop back to zero the moment quarantine restored capacity:
 ![Grafana error rate panel showing spike and recovery around the quarantine event](screenshots/remediator-grafana-recovery.png)
+
+</details>
+
+<details>
+<summary><b>AWS-native monitoring — CloudWatch (6 screenshots)</b></summary>
+
+Container Insights overview, with the alarm rows populated rather than reading "No alarms detected":
+![CloudWatch Container Insights overview for the railhead-dev cluster](screenshots/cloudwatch-container-insights.png)
+
+All three alarms in `OK`, none carrying a notification action:
+![CloudWatch alarms list showing all three railhead-dev alarms OK](screenshots/cloudwatch-alarms.png)
+
+Both log groups at 1-day retention and Terraform-managed — the fix for never-expiring groups outliving `terraform destroy`:
+![CloudWatch log groups showing both railhead groups at 1 day retention](screenshots/cloudwatch-log-groups-retention.png)
+
+`apiserver_storage_size_bytes` graphed — etcd object storage, a control-plane metric Prometheus cannot scrape on managed EKS:
+![CloudWatch metrics graph of apiserver_storage_size_bytes](screenshots/cloudwatch-apiserver-storage.png)
+
+Least-privilege proven from outside the cluster: the remediator's `Role` allows patch and delete, and the audit log shows it only ever issued `list pods` in one namespace:
+![Logs Insights query showing the remediator ServiceAccount made only list-pods calls](screenshots/cloudwatch-logs-insights-least-privilege.png)
+
+Top API-server callers over ~90 minutes. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each and are invisible to Prometheus on managed EKS:
+![Logs Insights query ranking API server callers by request count](screenshots/cloudwatch-logs-insights-top-callers.png)
 
 </details>
