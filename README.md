@@ -252,7 +252,7 @@ Both log groups at 1-day retention and Terraform-managed — the fix for never-e
 `apiserver_storage_size_bytes` graphed — etcd object storage, a control-plane metric Prometheus cannot scrape on managed EKS:
 ![CloudWatch metrics graph of apiserver_storage_size_bytes](screenshots/cloudwatch-apiserver-storage.png)
 
-Least-privilege proven from outside the cluster: the remediator's `Role` allows patch and delete, and the audit log shows it only ever issued `list pods` in one namespace:
+Least-privilege proven from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and the audit log shows exactly one was ever exercised: `list pods`, twice, in `railhead`. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
 ![Logs Insights query showing the remediator ServiceAccount made only list-pods calls](screenshots/cloudwatch-logs-insights-least-privilege.png)
 
 Top API-server callers over ~90 minutes. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each and are invisible to Prometheus on managed EKS:
