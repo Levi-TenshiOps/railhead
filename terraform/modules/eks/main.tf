@@ -36,6 +36,25 @@ resource "aws_iam_role_policy_attachment" "cluster_policy" {
 }
 
 # ---------------------------------------------------------------------------
+# Control plane log group — MUST exist before the cluster.
+#
+# With enabled_cluster_log_types set, EKS creates this group itself during
+# cluster creation if it doesn't already exist, and the group it creates
+# never expires and is not owned by Terraform. That group then survives
+# `terraform destroy` and orphans: found 1.51 GB of audit logs here dating
+# back to the very first cluster, accumulated across every session since.
+#
+# Declaring it here and forcing the cluster to depend on it means Terraform
+# creates it first, owns it, and destroys it with the cluster. The 1-day
+# retention is the safety net if that ordering ever fails anyway.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "cluster" {
+  name              = "/aws/eks/${var.cluster_name}/cluster"
+  retention_in_days = 1
+}
+
+# ---------------------------------------------------------------------------
 # EKS control plane
 # ---------------------------------------------------------------------------
 
@@ -59,7 +78,10 @@ resource "aws_eks_cluster" "this" {
 
   enabled_cluster_log_types = ["api", "audit"]
 
-  depends_on = [aws_iam_role_policy_attachment.cluster_policy]
+  depends_on = [
+    aws_iam_role_policy_attachment.cluster_policy,
+    aws_cloudwatch_log_group.cluster,
+  ]
 }
 
 # ---------------------------------------------------------------------------
@@ -325,4 +347,237 @@ resource "aws_eks_addon" "ebs_csi" {
   service_account_role_arn = aws_iam_role.ebs_csi_irsa.arn
 
   depends_on = [aws_eks_node_group.this]
+}
+
+# ---------------------------------------------------------------------------
+# CloudWatch Container Insights — a second, INDEPENDENT observability path
+# alongside Prometheus/Grafana/Loki. The point is not redundancy for its own
+# sake: CloudWatch is an external observer that survives failures of the
+# in-cluster stack, and on managed EKS it can reach control-plane data that
+# Prometheus structurally cannot scrape.
+#
+# Container Insights publishes metrics as embedded metric format (EMF) THROUGH
+# CloudWatch Logs, so this log group exists even with container log shipping
+# switched off. Left to the agent to create, it defaults to never-expire and
+# is unowned by Terraform -- which is exactly how /aws/eks/railhead-dev/cluster
+# accumulated 1.51 GB across every session before anyone noticed.
+#
+# DESTROY ORDER: Terraform destroys in reverse dependency order, so the add-on
+# must depend on the log group. Otherwise the group is deleted first, the agent
+# is still running and immediately recreates it, and the recreated group -- now
+# unmanaged -- outlives the cluster. The 1-day retention is the backstop if
+# that ordering ever fails anyway.
+# ---------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "container_insights_performance" {
+  name              = "/aws/containerinsights/${var.cluster_name}/performance"
+  retention_in_days = 1
+}
+
+# ---------------------------------------------------------------------------
+# IRSA: CloudWatch agent — scoped to amazon-cloudwatch:cloudwatch-agent.
+#
+# That ServiceAccount name was read off the running cluster after installing
+# the add-on, not taken from documentation. Getting it wrong does not fail
+# loudly: the agent falls back to the node instance role, which has no
+# CloudWatch permissions, and every pod stays Running while silently
+# publishing nothing. Confirmed by watching it happen -- the agent logged
+# `AccessDeniedException ... assumed-role/railhead-dev-eks-node-role ... is
+# not authorized to perform: logs:PutLogEvents` and dropped 968 datapoints
+# per flush while reporting healthy.
+#
+# This role lives in module.eks, not module.iam, and that placement is
+# load-bearing. Its trust policy references the cluster's OIDC issuer URL,
+# which contains a cluster ID that changes on every destroy/recreate. A role
+# persisted in module.iam would survive teardown still trusting a provider
+# that no longer exists, and IRSA would fail silently on the next rebuild.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "cloudwatch_agent_irsa_assume" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.cluster.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.cluster.url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:amazon-cloudwatch:cloudwatch-agent"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(aws_iam_openid_connect_provider.cluster.url, "https://", "")}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "cloudwatch_agent_irsa" {
+  name               = "${var.cluster_name}-cloudwatch-agent-irsa"
+  assume_role_policy = data.aws_iam_policy_document.cloudwatch_agent_irsa_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "cloudwatch_agent_irsa" {
+  role       = aws_iam_role.cloudwatch_agent_irsa.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+# Every optional workload this add-on ships defaults to enabled. Six are turned
+# off deliberately:
+#   containerLogs      - Loki already owns logs. Shipping them twice doubles
+#                        ingestion cost for no added signal.
+#   kubeStateMetrics   - kube-prometheus-stack already runs one.
+#   nodeExporter       - so does this. Both would be straight duplicates.
+#   applicationSignals - APM tracing, out of scope; needs workload annotations
+#                        to do anything, so it would be inert cost.
+#   dcgmExporter       - NVIDIA GPU telemetry. No GPU nodes.
+#   neuronMonitor      - AWS Neuron telemetry. No Inferentia/Trainium nodes.
+# containerInsights stays on: that is the cluster/node/pod metric pipeline this
+# whole exercise exists for.
+resource "aws_eks_addon" "cloudwatch_observability" {
+  cluster_name             = aws_eks_cluster.this.name
+  addon_name               = "amazon-cloudwatch-observability"
+  addon_version            = var.cloudwatch_observability_addon_version
+  service_account_role_arn = aws_iam_role.cloudwatch_agent_irsa.arn
+
+  configuration_values = jsonencode({
+    containerLogs      = { enabled = false }
+    kubeStateMetrics   = { enabled = false }
+    nodeExporter       = { enabled = false }
+    applicationSignals = { enabled = false }
+    dcgmExporter       = { enabled = false }
+    neuronMonitor      = { enabled = false }
+    containerInsights  = { enabled = true }
+  })
+
+  # The node group dependency is not cosmetic: without nodes the DaemonSet has
+  # nowhere to schedule and the add-on settles into DEGRADED on a fresh apply.
+  depends_on = [
+    aws_eks_node_group.this,
+    aws_cloudwatch_log_group.container_insights_performance,
+  ]
+}
+
+# ---------------------------------------------------------------------------
+# CloudWatch alarms.
+#
+# NONE of these carry alarm_actions, and that is deliberate rather than
+# unfinished. Alertmanager already owns notification routing for this project,
+# and a second delivery path is a second thing that can drift out of sync --
+# the same reasoning that keeps AUTO_REMEDIATE_ALERTS as the single source of
+# truth for what gets auto-remediated instead of splitting it across
+# Alertmanager's routing tree. These alarms are state you can query and see in
+# the console; they are not a pager.
+#
+# Thresholds below are derived from values observed on this cluster, recorded
+# in each comment, rather than copied from documentation.
+# ---------------------------------------------------------------------------
+
+# META-MONITORING. The remediator watches railhead-api; nothing watched the
+# remediator. It runs a single replica by design (its state lives in pod
+# labels, so restarting it loses nothing) -- but a single replica that dies
+# stays dead, and the in-cluster stack cannot reliably alert on its own
+# failure. Prometheus and Alertmanager run in the same cluster and would be
+# subject to the same outage. CloudWatch is an external observer that survives
+# the failure it reports on, which is the actual argument for running both
+# systems rather than picking one.
+#
+# service_number_of_running_pods scopes to a single Kubernetes Service.
+# namespace_number_of_running_pods was rejected: it counts api + worker +
+# postgres + remediator together, so losing the remediator would barely move
+# it and any threshold low enough to catch that would also fire on a routine
+# api rollout.
+#
+# treat_missing_data = "breaching" is the load-bearing setting. If the pod
+# disappears entirely the metric stops publishing rather than reporting zero,
+# and the CloudWatch default would park the alarm in INSUFFICIENT_DATA --
+# silent for precisely the failure it exists to catch.
+#
+# Observed baseline: 1.0, stable.
+# EXPECTED at teardown: this goes to ALARM when the pod is destroyed. Correct
+# behaviour, not a fault.
+resource "aws_cloudwatch_metric_alarm" "remediator_down" {
+  alarm_name        = "${var.cluster_name}-remediator-down"
+  alarm_description = "railhead-remediator has no running pods. Nothing else watches the remediator; Prometheus cannot reliably alert on a failure inside its own cluster."
+
+  namespace   = "ContainerInsights"
+  metric_name = "service_number_of_running_pods"
+  dimensions = {
+    ClusterName = aws_eks_cluster.this.name
+    Service     = "railhead-remediator"
+    Namespace   = "railhead"
+  }
+
+  statistic           = "Minimum"
+  comparison_operator = "LessThanThreshold"
+  threshold           = 1
+  period              = 60
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  treat_missing_data  = "breaching"
+}
+
+# INFRASTRUCTURE. Threshold anchored to kubelet's own behaviour, not a round
+# number: the default nodefs.available eviction signal is 10% free, so kubelet
+# begins evicting pods at roughly 90% utilization. Alarming at 80% leaves a
+# ~10 point margin to react before eviction starts.
+#
+# Maximum, not Average: with only ClusterName as a dimension, Average blends
+# both nodes and every filesystem on them, so one filling disk would be hidden
+# by healthy ones. Maximum surfaces the worst case, which is the entire point
+# of a disk-pressure alarm.
+#
+# Observed baseline: avg 11.8%, max 40.3%.
+resource "aws_cloudwatch_metric_alarm" "node_filesystem_high" {
+  alarm_name        = "${var.cluster_name}-node-filesystem-high"
+  alarm_description = "A node filesystem is above 80% utilization. kubelet begins evicting pods near 90% (nodefs.available default of 10% free)."
+
+  namespace   = "ContainerInsights"
+  metric_name = "node_filesystem_utilization"
+  dimensions = {
+    ClusterName = aws_eks_cluster.this.name
+  }
+
+  statistic           = "Maximum"
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 80
+  period              = 300
+  evaluation_periods  = 2
+  treat_missing_data  = "missing"
+}
+
+# CONTROL PLANE. This is data Prometheus structurally cannot reach on managed
+# EKS -- the API server and etcd are AWS-operated and unscrapeable -- which
+# makes it the clearest example of CloudWatch filling a real capability gap
+# rather than duplicating a Grafana panel.
+#
+# Honest framing: this is a growth-anomaly detector, not a capacity alarm.
+# EKS's etcd limit is 8 GB and this cluster sits at 27 MB, so a threshold
+# anchored to the real limit would never fire and would be decorative. 100 MB
+# is ~3.7x the observed baseline: above anything normal workload churn
+# produces, low enough to catch a controller looping on object creation or a
+# runaway CRD long before etcd itself is under stress.
+#
+# Observed baseline: 28,270,592 bytes (27.0 MB), flat.
+resource "aws_cloudwatch_metric_alarm" "apiserver_storage_growth" {
+  alarm_name        = "${var.cluster_name}-apiserver-storage-growth"
+  alarm_description = "etcd object storage exceeded 100 MB against a ~27 MB baseline. Indicates abnormal object accumulation, not capacity pressure -- the EKS limit is 8 GB."
+
+  namespace   = "ContainerInsights"
+  metric_name = "apiserver_storage_size_bytes"
+  dimensions = {
+    ClusterName = aws_eks_cluster.this.name
+  }
+
+  statistic           = "Maximum"
+  comparison_operator = "GreaterThanThreshold"
+  threshold           = 104857600
+  period              = 300
+  evaluation_periods  = 2
+  treat_missing_data  = "missing"
 }
