@@ -15,13 +15,33 @@ Only 5xx counts as "bad" here — 4xx (bad client requests) is deliberately excl
 
 ## First things to check
 
-1. **Grafana → `Railhead — API Metrics` dashboard.** The "Error Rate (4xx/5xx)" panel will show you whether this is a sudden spike or a slow climb, and the "Request Rate by Endpoint" panel tells you if it's isolated to one handler or spread across all of them.
+1. **Grafana → `Railhead — API Metrics` dashboard.**
+   - **Error Rate (4xx/5xx)** — spike vs. slow climb. Aggregate only; for the per-endpoint breakdown run in Explore:
+     ```
+     sum by (handler) (rate(http_requests_total{job="railhead-api", status=~"5xx"}[5m]))
+     ```
+   - **Request Rate by Endpoint** — won't move during a failure; a 500 is still a request. Read traffic shape instead:
+     - steady ~0.1 req/s → traffic arriving, failure is in responses. Expected here.
+     - zero → worker or Service is broken; the SLO is measuring nothing and will report healthy. Its own incident.
+     - spiking → load-related; check saturation first.
+     - `/health` (~0.6 req/s) flattens the other series — hide it via the legend.
+   - **p95 Latency by Endpoint** — "slow" vs. "erroring."
+     - errors up, latency flat/down → fast failure (DNS, connection refused, pool exhausted); nothing waiting on a timeout.
+     - latency up first, then errors → saturation or timeouts.
+     - latency up, errors flat → degraded but working; latency budget only.
+     - buckets are 0.1/0.3/0.5/1, so p95 is interpolated: "0.29" means "upper part of 0.1–0.3," not 290ms. Only movement across a boundary is real.
 2. **Grafana → `Railhead — Cluster Health` dashboard.** Check "Pod Restarts" and "Pod Count by Namespace" first — a crash-looping pod is the single most common cause here (see below), and this dashboard shows it at a glance before you even need to touch `kubectl`.
 3. **Loki, via Grafana Explore → Loki datasource.** Start with:
    ```
-   {namespace="railhead", container="api"} |= "ERROR"
+   {namespace="railhead", container="api"} |~ "Error:|Exception:"
    ```
-   This surfaces the actual exception tracebacks, which almost always name the real cause directly (e.g. a `psycopg2.OperationalError` names the exact Postgres failure mode).
+   Returns just the exception line that names the cause, e.g. `psycopg2.OperationalError: connection to server at "..." port 5432 failed: Connection refused`. One line per failed request — enough to identify the failure mode before reading anything else.
+
+   Then read the surrounding traceback:
+   ```
+   {namespace="railhead", container="api"} != "/health" != "/metrics"
+   ```
+   Drops the access-log chatter from probes and scrapes (~20/min per pod), leaving the `/items` requests and their full tracebacks. Exclude rather than match: Loki filters line by line, so any keyword filter returns disconnected fragments instead of a readable stack. Add `pod="<name>"` to isolate one replica.
 4. **`kubectl get pods -n railhead`** — fast sanity check for `CrashLoopBackOff`, `ImagePullBackOff`, or a pod stuck at `0/1` ready.
 
 ## Common causes
@@ -48,6 +68,8 @@ Only 5xx counts as "bad" here — 4xx (bad client requests) is deliberately excl
 A different, narrower alert than the two above: it fires when a pod serves majority 5xx on non-health-check requests. The expression is per-pod and does **not** compare replicas — one pod firing alone is the corrupted-connection-pool case; several firing at once is a shared outage. The remediator makes that distinction itself, because Alertmanager hands it every firing alert in one payload. Unlike the burn-rate alerts, this one has an automated first response: `railhead-remediator` quarantines the named pod, no human needed for the common case.
 
 **What you'll see:** a `:hospital:` Slack message naming the pod, with an evidence block (recent logs, restart count, image) captured *before* the action, so the failure evidence survives the pod. "Quarantined" means its `app` label was patched to `railhead-api-quarantined`, dropping it out of the Service selector (traffic stops) and the ReplicaSet selector (a replacement is created) — full mechanism in the root README's [Automated Remediation](../../README.md#automated-remediation) section.
+
+**What this actually fixes:** the ReplicaSet sees one fewer pod matching its selector and creates a replacement, which builds a fresh connection pool at startup — so the corrupted-pool failure doesn't carry over and the `/items` 5xx rate returns to zero. Readiness allows ~5-10s after the container starts, so expect recovery well under a minute unless the image has to be pulled. Until then you're at reduced capacity; the `MIN_REMAINING_READY` guard is what keeps at least one pod serving. Confirm with `kubectl get pods -n railhead` (new pod, `1/1`) and the Error Rate panel. If errors persist once the replacement is Ready, the fault wasn't pod-local — escalate.
 
 **Reading the follow-up `resolved` alert:** once the pod is quarantined, it stops receiving traffic and Prometheus stops scraping it, so the per-pod error-rate series it was firing on simply disappears — Alertmanager reports this as the alert resolving. **A `resolved` notification here means the quarantine worked, not that the underlying problem fixed itself.** Don't read it as "safe to ignore" the way you would for a burn-rate alert that cleared because traffic actually recovered.
 

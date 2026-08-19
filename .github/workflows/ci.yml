@@ -24,10 +24,9 @@ jobs:
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      # Only the remediator has tests: it is the one service that takes an
-      # action on its own, so its safety guards are the part where a silent
-      # regression actually costs something. Gated on the matrix service so
-      # this runs once, not once per image.
+      # Only the remediator has tests — it is the one service that acts on its
+      # own, so a silent regression in its safety guards actually costs
+      # something. Gated on the matrix service to run once, not once per image.
       - name: Set up Python
         if: matrix.service == 'remediator'
         uses: actions/setup-python@v5
@@ -51,11 +50,10 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
-      # Everything below only runs on pushes to main. Pull request runs never
-      # request AWS credentials at all, since build+scan needs none of them -
-      # this removes the entire class of risk where a crafted build step in
-      # a PR could exfiltrate cloud credentials, rather than relying on the
-      # push being blocked some other way.
+      # Everything below runs only on pushes to main. PR runs never request AWS
+      # credentials at all — build and scan need none — so a crafted build step
+      # in a PR has no cloud credentials to exfiltrate in the first place,
+      # rather than relying on the push being blocked some other way.
       - name: Configure AWS credentials
         if: github.event_name == 'push'
         uses: aws-actions/configure-aws-credentials@v4
