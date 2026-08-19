@@ -10,6 +10,13 @@ RUN pip install -r requirements.txt
 
 FROM python:3.12-slim
 
+# Patches OS packages inherited from the base image. Trivy gates this build on
+# HIGH/CRITICAL with ignore-unfixed, so a CVE that Debian has already fixed
+# fails CI the moment the fix lands upstream — on any commit, including ones
+# that touch no code. Rebuilding here beats waiting for the base image tag to
+# be refreshed. Placed before the COPY so app changes don't invalidate it.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
