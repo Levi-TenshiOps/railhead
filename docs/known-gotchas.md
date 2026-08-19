@@ -36,6 +36,7 @@ end and keep their number permanently, even once a later entry supersedes them.
 25. [CloudWatch log groups outlive `terraform destroy`](#25)
 26. [An IRSA annotation does not reach pods that already exist](#26)
 27. [`Get-Date -UFormat %s` returns local-time epoch, not UTC](#27)
+28. [CI fails on commits that changed nothing, because the CVE gate tracks Debian's schedule](#28)
 
 ---
 
@@ -247,3 +248,22 @@ A from-scratch rebuild is unaffected, because the add-on and the role are create
 `aws logs start-query` takes Unix timestamps. Building them with `[int][double]::Parse((Get-Date -UFormat %s))` produced a window six hours off — the local UTC offset — and the API rejected it with `Query's end date and time is either before the log groups creation time or exceeds the log groups log retention settings`, which reads like a retention misconfiguration rather than a clock problem.
 
 PowerShell 5.1's `-UFormat %s` formats the *local* time as though it were UTC. Use `[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()` instead, which is unambiguous and needs no parsing.
+
+<a id="28"></a>
+### 28. CI fails on commits that changed nothing, because the CVE gate tracks Debian's schedule
+
+A commit touching only comments and `.gitignore` failed CI on all three images. Nothing in the repo regressed: Trivy found `CVE-2026-53615`, an integer overflow in `libblkid/src/partitions/dos.c`, in the `util-linux` packages inherited from `python:3.12-slim`. Installed `2.41-5`, fixed upstream in `2.41.5-0+deb13u1`. The previous run four days earlier was green against the same base image tag and the same Dockerfiles.
+
+The scanner is configured `ignore-unfixed: true`, which is what makes this a *scheduling* problem rather than a code one. Trivy stays silent about a vulnerability until Debian ships a fix, then fails the build the moment one exists — so the gate trips on the upstream release calendar, and the triggering commit is whichever one happens to run next. Pinning the base image tag does not help; the tag is a moving target that Docker Hub rebuilds on its own cadence, and until it does, every build pulls the unpatched packages.
+
+Two things make the failure read worse than it is. GitHub shows `0 / 3`, but the matrix's default `fail-fast: true` **cancelled** the other two jobs the moment one failed — they never ran, rather than failing. And the results table lists nine HIGH findings, which is one CVE counted nine times: `bsdutils`, `libblkid1`, `liblastlog2-2`, `libmount1`, `libsmartcols1`, `libuuid1`, `login`, `mount`, and `util-linux` are all binary packages built from the same source. Read the Vulnerability column, not the row count.
+
+The fix is to patch at build time rather than wait for the base image, in the final stage of each Dockerfile before `USER app`:
+
+```dockerfile
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+```
+
+Placed before the `COPY` of application source so an app change does not invalidate the layer. The builder stage needs no equivalent — only `/opt/venv` is copied out of it, which holds Python packages and no OS libraries.
+
+The general shape is worth recognising beyond this one CVE: a build whose success depends on upstream timing rather than on repository state will fail on an arbitrary unrelated commit, and the commit will look like the cause. The same run also began warning that `actions/checkout@v4`, `actions/setup-python@v5`, and `aws-actions/configure-aws-credentials@v4` target a deprecated Node.js 20 and are being forced onto Node 24 — a different mechanism, same drift, and a warning today rather than a failure.
