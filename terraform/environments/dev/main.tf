@@ -41,6 +41,14 @@ module "argocd" {
   depends_on = [module.eks]
 }
 
+module "chaos_mesh" {
+  source = "../../modules/chaos-mesh"
+
+  cluster_name = module.eks.cluster_name
+
+  depends_on = [module.eks]
+}
+
 # ecr:GetAuthorizationToken authenticates to the ECR registry itself
 # (it's how the docker/aws CLI gets a login token before any specific
 # repository is even known), not to a single repository, so AWS does not
