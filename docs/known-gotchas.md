@@ -37,6 +37,9 @@ end and keep their number permanently, even once a later entry supersedes them.
 26. [An IRSA annotation does not reach pods that already exist](#26)
 27. [`Get-Date -UFormat %s` returns local-time epoch, not UTC](#27)
 28. [CI fails on commits that changed nothing, because the CVE gate tracks Debian's schedule](#28)
+29. [Chaos Mesh breaks under ArgoCD because Helm generates its webhook cert at render time](#29)
+30. [`chaos-daemon` logs a `/dev/fuse` ERROR on every node, and mostly does not mean it](#30)
+31. [Git Bash rewrites absolute paths passed to `kubectl exec`](#31)
 
 ---
 
@@ -267,3 +270,62 @@ RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 Placed before the `COPY` of application source so an app change does not invalidate the layer. The builder stage needs no equivalent — only `/opt/venv` is copied out of it, which holds Python packages and no OS libraries.
 
 The general shape is worth recognising beyond this one CVE: a build whose success depends on upstream timing rather than on repository state will fail on an arbitrary unrelated commit, and the commit will look like the cause. The same run also began warning that `actions/checkout@v4`, `actions/setup-python@v5`, and `aws-actions/configure-aws-credentials@v4` target a deprecated Node.js 20 and are being forced onto Node 24 — a different mechanism, same drift, and a warning today rather than a failure.
+
+<a id="29"></a>
+### 29. Chaos Mesh breaks under ArgoCD because Helm generates its webhook cert at render time
+
+**Symptom.** Chaos Mesh deployed as an ArgoCD Application on EKS fails chaos CR creation with `x509: certificate signed by unknown authority`. Upstream [issue #4764](https://github.com/chaos-mesh/chaos-mesh/issues/4764), still open. It is reported against workflow creation, but one webhook server serves every chaos CR type, so it is not specific to workflows.
+
+**Cause.** With `webhook.certManager.enabled: false` (the chart default, and what we use), the chart generates the webhook's cert itself. Its `values.yaml` says of `caBundlePEM`, `crtPEM` and `keyPEM`: *"if empty and disable certManager, Helm will auto-generate these fields."*
+
+That generation happens **when Helm renders the chart**, not at runtime in the controller — and `genSignedCert` produces a different certificate every time it runs. So:
+
+- **Terraform** renders once, stores the result in state, and never re-renders. The cert is stable.
+- **ArgoCD** re-renders on every sync, producing a fresh certificate each time. The webhook server keeps serving the key it started with, selfHeal overwrites the `caBundle` with the newly generated one, the two stop matching, and TLS verification fails.
+
+**This is why chaos-mesh is a Terraform `helm_release` and not a sixth ArgoCD Application** (`terraform/modules/chaos-mesh/main.tf`).
+
+**Verified on this install.** A PodChaos CR applied cleanly — `podchaos.chaos-mesh.org/worker-pod-kill-smoke created`, exit 0, no webhook error — with the webhook configuration still the one created at install time.
+
+**One detail that will mislead you when debugging this.** The chart pins the *leaf* certificate as its own trust anchor: the `caBundle` in the `chaos-mesh-mutation` MutatingWebhookConfiguration is byte-identical to the serving cert in the `chaos-mesh-webhook-certs` Secret (`sha256 A5:31:4B:8A:79:13:97:E7...` here; `CN=chaos-mesh-controller-manager.chaos-mesh.svc`, issued by `CN=chaos-mesh-ca`, valid 2026-08-31 to 2031-08-30). Go's x509 verifier accepts a certificate that is itself in the root pool, so this is fine. But `openssl verify -CAfile` **rejects** it, because openssl insists on a real issuer chain. Do not use openssl's verdict to diagnose this — it reports a failure that is not there.
+
+**Live constraint going forward.** Any future `helm upgrade` of this release regenerates the certs. A chart version bump is a webhook-affecting change: verify it by creating a chaos CR afterwards. Pods going Ready proves nothing here.
+
+<a id="30"></a>
+### 30. `chaos-daemon` logs a `/dev/fuse` ERROR on every node, and mostly does not mean it
+
+Every `chaos-daemon` pod logs this at startup:
+
+```
+ERROR chaos-daemon.daemon-server  grant access to /dev/fuse
+      {"error": "fail to find device cgroup"}
+```
+
+**It is not a misconfiguration and no setting fixes it.** The nodes are Amazon Linux 2023 running `cgroup2fs` (confirm with `stat -fc %T /sys/fs/cgroup`). cgroup v2 has no `devices` controller — device access is enforced through eBPF instead — so the lookup `fusedev.GrantAccess` performs cannot succeed on any cgroup v2 node.
+
+**It is non-fatal.** The daemon continues past it, remounts `/sys` read-write, and starts both its gRPC and HTTP endpoints, logging `{"runtime": "containerd"}`. PodChaos was verified working with this error present.
+
+**Scoped risk, not a confirmed failure.** `/dev/fuse` backs Chaos Mesh's FUSE-based filesystem injection, so **IOChaos may be degraded or unusable** here. This has not been tested. PodChaos, NetworkChaos, StressChaos, TimeChaos, DNSChaos and HTTPChaos are unaffected.
+
+**Action required before Week 7 scenario design.** The planned storage-latency scenario is modelled on vSAN incidents, and IOChaos is the obvious tool for it. Verify IOChaos works before committing to that scenario, not during it. If it does not, the alternatives are StressChaos on disk I/O, or NetworkChaos latency against Postgres.
+
+Worth naming for its shape: this is the **inverse** of the recurring "configured, reports healthy, does nothing" pattern (#21, #24). This one reports broken and mostly works. Both defeat the same reflex — reading the status line instead of testing the behaviour.
+
+<a id="31"></a>
+### 31. Git Bash rewrites absolute paths passed to `kubectl exec`
+
+`kubectl -n chaos-mesh exec <pod> -- stat -fc %T /sys/fs/cgroup` failed in Git Bash with:
+
+```
+stat: cannot read file system information for 'C:/Program Files/Git/sys/fs/cgroup'
+```
+
+MSYS path conversion rewrites anything that looks like an absolute POSIX path into a Windows path before the native command sees it. The path was meant for the *container*, but the rewrite happens on the way out of the shell, so the container received a Windows path that cannot exist there.
+
+The fix is to disable the conversion for that command:
+
+```
+MSYS_NO_PATHCONV=1 kubectl -n chaos-mesh exec <pod> -- stat -fc %T /sys/fs/cgroup
+```
+
+Same family as #20 — a shell mangling arguments to a native command — but a different shell and a different mechanism, so both have to be known separately: PowerShell re-quotes, Git Bash re-paths.

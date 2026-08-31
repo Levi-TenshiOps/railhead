@@ -73,22 +73,48 @@ aws ec2 describe-volumes --region us-east-1 --filters "Name=status,Values=availa
 `available`. Loki's SingleBinary keeps its own 5Gi PVC for the WAL and index
 cache even though chunks live in S3; it is not exempt.
 
-## 4. Delete the argocd namespace, before Terraform runs
+## 4. Delete the argocd and chaos-mesh namespaces, before Terraform runs
+
+**First confirm no chaos experiments are outstanding.** Chaos CRs carry a
+finalizer that only the chaos-controller-manager removes. Delete the namespace
+with CRs still live and the controller dies alongside them, leaving nothing to
+clear their finalizers — they then hang indefinitely.
 ```
-kubectl delete namespace argocd
+kubectl get podchaos,networkchaos,stresschaos,iochaos,timechaos,dnschaos,httpchaos -A
 ```
-**Expect** completion in under 20 seconds. Terraform owns this namespace and
-would destroy it in step 5 — but there the deletion races the node group going
+**Expect no resources found.** If anything is listed, delete it and confirm it
+is gone *before* continuing. This costs nothing today with no experiments
+running, and becomes load-bearing the moment Week 7 scenarios are live.
+```
+kubectl delete namespace argocd chaos-mesh
+```
+**Expect** completion in under 20 seconds. Terraform owns both namespaces and
+would destroy them in step 5 — but there the deletion races the node group going
 away. Once the NAT Gateway is gone the nodes go `NotReady`, kubelet can never
 confirm pod shutdown, and finalization blocks on pods that will never report
-(`known-gotchas.md` #19). Deleting it here, while the cluster is healthy, avoids
-the hang entirely.
+(`known-gotchas.md` #19). Deleting them here, while the cluster is healthy,
+avoids the hang entirely.
+
+`chaos-mesh` is included by analogy, not measurement: a Terraform-owned
+namespace holding five running pods, the same shape as `argocd`. **Not yet
+verified through a real teardown** — confirm on the next one and correct this if
+it behaves differently.
+
+Helm does not remove CRDs on uninstall, so Chaos Mesh's survive the
+`helm_release` destroy. Harmless here, since step 5 takes the cluster with them;
+it would matter only if chaos-mesh were uninstalled on its own.
 
 ## 5. Destroy EKS and the VPC together, in one command
 ```
 terraform -chdir=terraform/environments/dev destroy "-target=module.eks" "-target=module.vpc"
 ```
-**Expect `51 destroyed`, around 11 minutes.** Not sequentially — the cluster's API
+**Expect around 11 minutes.** The count is deliberately not asserted; see the
+note on counts in `rebuild-sequence.md` step 1. **Open question for the next
+teardown:** a `plan -destroy` on a fully built cluster showed **59**, against
+the **51** this step reported historically. Probably measured at different
+points — steps 1–4 delete Applications and namespaces out of band, and
+plan-time refresh drops them — but unconfirmed. Record the real number next run
+before calling either figure wrong. Not sequentially — the cluster's API
 endpoint is public-only, so node-to-control-plane traffic routes out through the
 NAT Gateway and back in, a dependency Terraform's graph cannot see. Destroying the
 VPC first drops the nodes mid-teardown and hangs anything waiting on the

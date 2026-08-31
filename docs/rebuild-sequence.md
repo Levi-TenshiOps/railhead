@@ -25,9 +25,17 @@ before touching a network setting.
 ```
 terraform -chdir=terraform/environments/dev apply "-target=module.vpc" "-target=module.iam" "-target=module.ecr" "-target=module.eks"
 ```
-**Expect `34 added`.** Quote the `-target` arguments — unquoted, PowerShell splits
-them and Terraform rejects the command with `Invalid target "module"`. The EKS
-control plane accounts for 8–10 minutes of that, the node group another 3.
+**Expect `0 to change, 0 to destroy` and roughly 40 added.** The exact count
+moves with every infrastructure change and is not worth chasing — it has been
+wrong twice already, and both times it flagged a stale document, not a broken
+cluster. The *shape* is what must never move: a change or a destroy in this pass
+means state disagrees with reality, and that is the signal to stop. The
+**Verification** section at the end covers what this misses — a resource that
+was never created at all.
+
+Quote the `-target` arguments — unquoted, PowerShell splits them and Terraform
+rejects the command with `Invalid target "module"`. The EKS control plane
+accounts for 8–10 minutes of that, the node group another 3.
 
 ## 1b. Point kubectl at the new cluster — required before any kubectl command
 ```
@@ -54,10 +62,15 @@ reporting all four repos regardless, so this fails as
 configured. It is time-dependent — fine on a rebuild soon after the last one,
 broken once cleanup has run (`known-gotchas.md` #24).
 ```
+helm repo add chaos-mesh https://charts.chaos-mesh.org --force-update
 helm repo update
 terraform -chdir=terraform/environments/dev apply "-target=module.argocd.helm_release.argocd"
 kubectl get crd | Select-String argoproj
 ```
+`helm repo update` only refreshes repos already *registered*, so `chaos-mesh`
+must be added first or step 3 cannot resolve the chart. `--force-update` keeps
+the line re-runnable; plain `helm repo add` exits non-zero once the repo exists
+(`known-gotchas.md` #23).
 **Expect `2 added`** — the `argocd` namespace and the Helm release. That is
 complete, not a partial failure; `railhead-repo-credentials` is not a dependency
 of `helm_release.argocd`, so `-target` skips it until step 3.
@@ -69,9 +82,15 @@ recognize GroupVersionKind from manifest (CRD may not be installed)`.
 ```
 terraform -chdir=terraform/environments/dev apply
 ```
-**Expect `16 added`** — the five `Application` resources, the `railhead` and
-`monitoring` namespaces, `railhead-repo-credentials`, the dashboards, and the
-Slack and Postgres Secrets.
+**Expect `0 to change, 0 to destroy`, and roughly 18 added** — the five
+`Application` resources, the `railhead` and `monitoring` namespaces,
+`railhead-repo-credentials`, the dashboards, the Slack and Postgres Secrets, and
+the `chaos-mesh` namespace and Helm release.
+
+**Chaos Mesh is created here, not in a pass of its own** — `module.chaos_mesh`
+consumes `module.eks` outputs, so this untargeted apply satisfies it. It is
+Terraform-deployed rather than a sixth ArgoCD Application because under ArgoCD
+its admission webhook breaks (`known-gotchas.md` #29). Do not convert it.
 
 **Go straight to step 4 — do not pause here.** ArgoCD starts syncing
 `observability` the moment this pass creates it and gives up after five failed
@@ -127,6 +146,9 @@ kubectl get nodes
 kubectl -n argocd get applications
 kubectl get pods -A | Select-String -Pattern "Pending|Error|CrashLoop"
 kubectl get pvc -A
+kubectl -n chaos-mesh get pods
+kubectl -n amazon-cloudwatch get pods
+aws cloudwatch describe-alarms --region us-east-1 --query "MetricAlarms[].[AlarmName,StateValue]" --output table
 ```
 - **Nodes** — 2x `t3.large` `Ready`, one in `us-east-1a`, one in `us-east-1b`.
 - **Applications** — all five (`alloy`, `loki`, `observability`, `railhead`,
@@ -134,8 +156,21 @@ kubectl get pvc -A
   few minutes before treating it as stuck.
 - **Problem pods** — no output. Two `railhead-api` pods showing **2–3 restarts
   each** is expected: they race Postgres on first start and settle on retry.
+  *Observation to watch:* the 2026-08-30 rebuild produced **zero** restarts. One
+  observation is not enough to change this line, but if it holds on the next
+  rebuild the race is less deterministic than documented, or something changed.
 - **PVCs** — three `Bound`: `observability-grafana` (2Gi), `storage-loki-0` (5Gi),
-  `data-railhead-postgresql-0` (2Gi).
+  `data-railhead-postgresql-0` (2Gi). Chaos Mesh adds none — the dashboard runs
+  on an `emptyDir` by design.
+- **Chaos Mesh** — five pods `Running`: `chaos-controller-manager`,
+  `chaos-dashboard`, `chaos-dns-server`, and `chaos-daemon` on **both** nodes.
+  A `/dev/fuse` `ERROR` in the daemon logs is expected and non-fatal
+  (`known-gotchas.md` #30).
+- **amazon-cloudwatch** — three pods `Running`: the controller-manager and a
+  `cloudwatch-agent` per node.
+- **Alarms** — all three `OK`: `railhead-dev-apiserver-storage-growth`,
+  `railhead-dev-node-filesystem-high`, `railhead-dev-remediator-down`. They pass
+  through `INSUFFICIENT_DATA` first; that is not a failure.
 
 **All-green in about 20 minutes** — ~12 for step 1, ~2 for step 2, under a minute
 each for steps 3 and 4, then ~5 for the Applications to converge.
