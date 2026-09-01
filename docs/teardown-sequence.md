@@ -75,46 +75,72 @@ cache even though chunks live in S3; it is not exempt.
 
 ## 4. Delete the argocd and chaos-mesh namespaces, before Terraform runs
 
-**First confirm no chaos experiments are outstanding.** Chaos CRs carry a
-finalizer that only the chaos-controller-manager removes. Delete the namespace
-with CRs still live and the controller dies alongside them, leaving nothing to
-clear their finalizers — they then hang indefinitely.
+**Prerequisite, not a sanity check: no chaos experiments may be outstanding.**
+Chaos CRs carry a finalizer that only the chaos-controller-manager removes, and
+the webhooks that guard those CRs stay behind after the controller is gone (see
+below). Once this step runs, a surviving chaos CR can no longer be deleted at
+all — the finalizer has no controller to clear it and the webhook rejects the
+delete. Clear them *first*.
 ```
 kubectl get podchaos,networkchaos,stresschaos,iochaos,timechaos,dnschaos,httpchaos -A
 ```
 **Expect no resources found.** If anything is listed, delete it and confirm it
-is gone *before* continuing. This costs nothing today with no experiments
-running, and becomes load-bearing the moment Week 7 scenarios are live.
+is gone *before* continuing. This is free today with no experiments running, and
+becomes the difference between a clean teardown and a stuck one the moment
+Week 7 scenarios are live.
 ```
 kubectl delete namespace argocd chaos-mesh
 ```
-**Expect** completion in under 20 seconds. Terraform owns both namespaces and
+**Expect around 45 seconds** (measured 45.8s on 2026-08-31). It deletes two
+namespaces now, one of them holding a DaemonSet, so it takes noticeably longer
+than the sub-20-second figure from when this step covered `argocd` alone — that
+is normal progress, not a hang. Terraform owns both namespaces and
 would destroy them in step 5 — but there the deletion races the node group going
 away. Once the NAT Gateway is gone the nodes go `NotReady`, kubelet can never
 confirm pod shutdown, and finalization blocks on pods that will never report
 (`known-gotchas.md` #19). Deleting them here, while the cluster is healthy,
 avoids the hang entirely.
 
-`chaos-mesh` is included by analogy, not measurement: a Terraform-owned
-namespace holding five running pods, the same shape as `argocd`. **Not yet
-verified through a real teardown** — confirm on the next one and correct this if
-it behaves differently.
+`chaos-mesh` was originally included by analogy with `argocd`, and is now
+**verified by a real teardown (2026-08-31)**: both namespaces deleted cleanly
+with no hang and no manual intervention.
 
-Helm does not remove CRDs on uninstall, so Chaos Mesh's survive the
-`helm_release` destroy. Harmless here, since step 5 takes the cluster with them;
-it would matter only if chaos-mesh were uninstalled on its own.
+**What survives the `helm_release` destroy.** Helm does not remove CRDs on
+uninstall, so Chaos Mesh's 23 CRDs stay, and so do three cluster-scoped webhook
+configurations — `chaos-mesh-mutation`, `chaos-mesh-validation` and
+`chaos-mesh-validation-auth` — all with `failurePolicy: Fail` and a backing
+service that no longer exists.
+
+They cannot block this teardown. Every rule in all three is scoped to
+`apiGroups: ["chaos-mesh.org"]`, including the one that reads
+`resources: ["*"]`, so they intercept chaos CRs and nothing else — no pods, no
+namespaces, no core resources. Step 5 then removes the whole cluster along with
+them.
+
+What they *do* mean is the reason step 4's CR check above is a prerequisite: a
+chaos CR left alive past this point cannot be deleted, because its finalizer has
+no controller and its webhook fails closed. It would matter beyond teardown only
+if chaos-mesh were ever uninstalled on its own, which would leave both the CRDs
+and these webhooks orphaned.
 
 ## 5. Destroy EKS and the VPC together, in one command
 ```
 terraform -chdir=terraform/environments/dev destroy "-target=module.eks" "-target=module.vpc"
 ```
-**Expect around 11 minutes.** The count is deliberately not asserted; see the
-note on counts in `rebuild-sequence.md` step 1. **Open question for the next
-teardown:** a `plan -destroy` on a fully built cluster showed **59**, against
-the **51** this step reported historically. Probably measured at different
-points — steps 1–4 delete Applications and namespaces out of band, and
-plan-time refresh drops them — but unconfirmed. Record the real number next run
-before calling either figure wrong. Not sequentially — the cluster's API
+**Expect `0 changed`, everything destroyed, exit 0, in around 11 minutes.** No
+resource count is asserted here, for the same reason as `rebuild-sequence.md`
+step 1: an exact number rots on every infrastructure change. What matters is the
+shape — a *changed* resource in a destroy plan, or a non-zero exit, means
+something disagrees with state and is the signal to stop.
+
+An earlier version of this note guessed that a documented **51** and an observed
+**59** differed because steps 1–4 delete resources out of band and plan-time
+refresh drops them. **Measured on 2026-08-31: that is false.** The plan showed
+61 before steps 1–4 ran and the destroy reported 61 after them — the count did
+not move. The old 51 simply predates the CloudWatch feature's 7 resources and
+chaos-mesh's 2. Deleting namespaces by hand does not change what Terraform
+destroys, because those resources are still in state and Terraform removes them
+either way. Not sequentially — the cluster's API
 endpoint is public-only, so node-to-control-plane traffic routes out through the
 NAT Gateway and back in, a dependency Terraform's graph cannot see. Destroying the
 VPC first drops the nodes mid-teardown and hangs anything waiting on the
