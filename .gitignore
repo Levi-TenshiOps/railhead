@@ -27,3 +27,7 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Chaos experiment renders -- contain a pod name valid for one cluster
+# lifetime only (chaos/run-scenario-1.ps1 regenerates them).
+chaos/experiments/.rendered-*.yaml

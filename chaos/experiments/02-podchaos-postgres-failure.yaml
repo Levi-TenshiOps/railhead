@@ -1,0 +1,46 @@
+# Scenario 2 -- take Postgres out from under BOTH railhead-api pods.
+#
+# Expected: both api pods serve 5xx together, RailheadAPIPodErrorRate fires
+# for both, Alertmanager groups them into one payload, and the remediator
+# REFUSES to quarantine on its multi_pod guard. The refusal is the result.
+#
+# This is a shared-dependency outage, not a bad pod -- quarantining anything
+# here would be wrong, because every replacement pod would be equally broken.
+#
+# Why pod-failure and not pod-kill: pod-kill deletes the pod and the
+# StatefulSet rebuilds it within seconds, which is too brief to drive the
+# alert. pod-failure swaps every container's image for a pause image and
+# holds it there for `duration`, so the outage lasts as long as we ask.
+#
+# Mechanically this is cleaner than scenario 1 and has no timing race. When
+# the Postgres process dies its sockets close, so the api pods' pooled
+# connections fail immediately rather than hanging; and once the pod leaves
+# its Service's EndpointSlice, DB_HOST (railhead-postgresql, a ClusterIP
+# Service) has zero backends, so new connections are refused instantly
+# instead of waiting out connect_timeout.
+#
+# Schema verified against the chaos-mesh 2.8.4 chart CRDs:
+#   spec.required        = [action, mode, selector]
+#   spec.action enum     = [pod-kill, pod-failure, container-kill]
+#   spec.duration        REQUIRED when action is pod-failure
+#   selector.pods        = map of namespace -> list of pod names
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: postgres-outage
+  namespace: chaos-mesh
+spec:
+  action: pod-failure
+
+  # StatefulSet pod name is deterministic, so this needs no placeholder and
+  # no resolver script -- unlike scenario 1.
+  mode: one
+  selector:
+    pods:
+      railhead:
+        - railhead-postgresql-0
+
+  # Required for pod-failure. 10m, not the 5m first proposed: readiness takes
+  # ~30s to fail, the alert needs ~2m sustained plus `for: 2m`, and there
+  # must be room left to watch the remediator refuse and gather evidence.
+  duration: 10m

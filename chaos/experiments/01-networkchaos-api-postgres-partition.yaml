@@ -1,0 +1,62 @@
+# Scenario 1 -- partition ONE railhead-api pod from Postgres.
+#
+# Expected: that pod serves 5xx on /items while /health stays green, the
+# per-pod RailheadAPIPodErrorRate alert fires, and railhead-remediator
+# quarantines it. The sibling api pod keeps serving 200.
+#
+# DO NOT apply this file directly. __POD_NAME__ is a placeholder.
+# Use chaos/run-scenario-1.ps1, which resolves the live pod name and renders
+# a real manifest. A hand-edited placeholder is a silent failure: an api pod
+# name changes on every rebuild, and selector.pods matching nothing produces
+# an experiment that injects nothing while still reporting as created.
+#
+# Targeted BY POD NAME, deliberately, not by label. The remediator quarantines
+# by rewriting the pod's `app` label, so a label selector could let Chaos Mesh
+# re-evaluate and re-select onto the surviving healthy pod mid-experiment --
+# turning a single-pod fault into a full outage. A pod-name selector cannot
+# re-select.
+#
+# Schema verified against the chaos-mesh 2.8.4 chart CRDs:
+#   spec.required            = [action, mode, selector]
+#   spec.action enum         includes "partition"
+#   spec.direction enum      = [to, from, both], default "to"
+#   spec.target.required     = [mode, selector]
+#   selector.pods            = map of namespace -> list of pod names
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: api-postgres-partition
+  namespace: chaos-mesh
+spec:
+  action: partition
+
+  # `mode` is required by the CRD even though selector.pods already names
+  # exactly one pod. With a single-entry pod list, "one" is that pod.
+  mode: one
+
+  # Upstream issue #4764 aside, chaos-mesh#4477 (open) reports that "to" and
+  # "from" both behave like "both" for the partition action. We want full
+  # isolation anyway -- stating "both" documents the intent rather than
+  # relying on a field whose asymmetry is known to be unreliable.
+  direction: both
+
+  selector:
+    pods:
+      railhead:
+        - __POD_NAME__
+
+  # The other side of the partition. railhead-postgresql-0 is a StatefulSet
+  # pod, so its name is deterministic across rebuilds -- no label guessing
+  # and no placeholder needed here.
+  target:
+    mode: all
+    selector:
+      pods:
+        railhead:
+          - railhead-postgresql-0
+
+  # Auto-recovers when this elapses; the CR remains until deleted. Generous
+  # on purpose: the alert needs ~2m of sustained 5xx plus `for: 2m`, then the
+  # remediator acts, then there is evidence to gather. Delete the CR early to
+  # recover immediately.
+  duration: 15m
