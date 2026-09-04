@@ -278,7 +278,7 @@ The general shape is worth recognising beyond this one CVE: a build whose succes
 <a id="29"></a>
 ### 29. Chaos Mesh breaks under ArgoCD because Helm generates its webhook cert at render time
 
-**Symptom.** Chaos Mesh deployed as an ArgoCD Application on EKS fails chaos CR creation with `x509: certificate signed by unknown authority`. Upstream [issue #4764](https://github.com/chaos-mesh/chaos-mesh/issues/4764), still open. It is reported against workflow creation, but one webhook server serves every chaos CR type, so it is not specific to workflows.
+**Symptom.** Chaos Mesh deployed as an ArgoCD Application on EKS fails chaos CR creation with `x509: certificate signed by unknown authority`. Upstream [issue #4764](https://github.com/chaos-mesh/chaos-mesh/issues/4764), open. Reported against workflow creation, but one webhook server serves every chaos CR type.
 
 **Cause.** With `webhook.certManager.enabled: false` (the chart default, and what we use), the chart generates the webhook's cert itself. Its `values.yaml` says of `caBundlePEM`, `crtPEM` and `keyPEM`: *"if empty and disable certManager, Helm will auto-generate these fields."*
 
@@ -288,8 +288,6 @@ That generation happens **when Helm renders the chart**, not at runtime in the c
 - **ArgoCD** re-renders on every sync, producing a fresh certificate each time. The webhook server keeps serving the key it started with, selfHeal overwrites the `caBundle` with the newly generated one, the two stop matching, and TLS verification fails.
 
 **This is why chaos-mesh is a Terraform `helm_release` and not a sixth ArgoCD Application** (`terraform/modules/chaos-mesh/main.tf`).
-
-**Verified on this install.** A PodChaos CR applied cleanly — `podchaos.chaos-mesh.org/worker-pod-kill-smoke created`, exit 0, no webhook error — with the webhook configuration still the one created at install time.
 
 **One detail that will mislead you when debugging this.** The chart pins the *leaf* certificate as its own trust anchor: the `caBundle` in the `chaos-mesh-mutation` MutatingWebhookConfiguration is byte-identical to the serving cert in the `chaos-mesh-webhook-certs` Secret (`sha256 A5:31:4B:8A:79:13:97:E7...` here; `CN=chaos-mesh-controller-manager.chaos-mesh.svc`, issued by `CN=chaos-mesh-ca`, valid 2026-08-31 to 2031-08-30). Go's x509 verifier accepts a certificate that is itself in the root pool, so this is fine. But `openssl verify -CAfile` **rejects** it, because openssl insists on a real issuer chain. Do not use openssl's verdict to diagnose this — it reports a failure that is not there.
 
@@ -307,7 +305,7 @@ ERROR chaos-daemon.daemon-server  grant access to /dev/fuse
 
 **It is not a misconfiguration and no setting fixes it.** The nodes are Amazon Linux 2023 running `cgroup2fs` (confirm with `stat -fc %T /sys/fs/cgroup`). cgroup v2 has no `devices` controller — device access is enforced through eBPF instead — so the lookup `fusedev.GrantAccess` performs cannot succeed on any cgroup v2 node.
 
-**It is non-fatal.** The daemon continues past it, remounts `/sys` read-write, and starts both its gRPC and HTTP endpoints, logging `{"runtime": "containerd"}`. PodChaos was verified working with this error present.
+**It is non-fatal.** The daemon continues past it, remounts `/sys` read-write, and starts both endpoints, logging `{"runtime": "containerd"}`. PodChaos verified working with this error present.
 
 **Scoped risk, not a confirmed failure.** `/dev/fuse` backs Chaos Mesh's FUSE-based filesystem injection, so **IOChaos may be degraded or unusable** here. This has not been tested. PodChaos, NetworkChaos, StressChaos, TimeChaos, DNSChaos and HTTPChaos are unaffected.
 
@@ -339,7 +337,7 @@ Same family as #20 — a shell mangling arguments to a native command — but a 
 
 **The general pattern: any automated action that removes a component from observation destroys the signal a multi-component guard depends on.** Quarantining, cordoning, draining, scaling to zero, pulling a backend out of a load balancer — each silences the very evidence that would have said "stop, this is systemic." A guard that reads live alert state must account for the fact that acting on one member changes what it can see about the rest.
 
-**What happened here.** `railhead-remediator` refuses to quarantine when several pods alert at once, because a shared dependency failing is not one bad pod and every replacement inherits the same fault. A Week 7 experiment took Postgres away from both `railhead-api` replicas and the guard **never engaged**: both pods were quarantined, 300 seconds apart (exactly Alertmanager's `group_interval`), with zero refusals.
+**What happened here.** `railhead-remediator` refuses to quarantine when several pods alert at once, because a shared dependency failing is not one bad pod. A Week 7 experiment took Postgres away from both `railhead-api` replicas and the guard **never engaged**: both pods quarantined, zero refusals (measurements in `week7-chaos-scorecard.md`).
 
 **Why.** Quarantining pod A rewrites its `app` label, dropping it from the Service. The ServiceMonitor scrapes *through* the Service, so Prometheus stops scraping A, its series goes stale, and **A's alert resolves**. When B fires, B genuinely is the only firing pod.
 
@@ -350,7 +348,7 @@ Two conditions combined, and the guard needed only one:
 
 Alertmanager grouping worked exactly as configured. Two paper reviews predicted this failure and both blamed grouping; both were wrong.
 
-**Severity was lower than feared.** The `ready_replicas` backstop was defeated benignly — the ReplicaSet's replacement reached Ready, `readyReplicas` returned to 2, and `ready - 1 >= MIN_REMAINING_READY` passed. But `readyReplicas` never hit 0 and `MIN_REMAINING_READY` held at every decision: **not a total outage.** Defence in depth held at the last layer. What failed was the layer meant to prevent pointless churn — two pods quarantined and two replacements spawned during an incident where every replacement was equally broken. `MAX_QUARANTINES = 3 / 15min` would have stopped a third.
+The `ready_replicas` backstop was then defeated benignly: the ReplicaSet's replacement reached Ready, `readyReplicas` returned to 2, and `ready - 1 >= MIN_REMAINING_READY` passed. It was **not a total outage** — that backstop held at every decision. What failed was the layer meant to prevent churn during a shared fault.
 
 **What to do.** Count pods from the alert *group* rather than firing-only; or gate on Deployment-level unavailable replicas; or add a cooldown between quarantines. Not applied — the measured behaviour is the artifact.
 
