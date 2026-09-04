@@ -43,12 +43,10 @@ Two paths lead into the cluster and they never cross: container images travel th
 
 ## Roadmap
 
-### Week 7 — Chaos Engineering
-- Chaos Mesh for orchestrating experiments
-- Chaos scenarios modeled on real production incidents diagnosed at Dell (storage latency, DNS misconfiguration, cert expiry, disk pressure/RAID, NTP/clock drift) — not generic random pod-killing
-- A self-healing scorecard: for each injected failure, record whether it self-healed automatically, was caught by Week 6's auto-remediation, or needed a human
-- Written postmortems for each simulated incident
-- Optional, revisit at the time: a small downstream service the API calls (tests graceful degradation vs. cascading failure), which would also be the point where distributed tracing finally has something real to show
+### Week 7 — Chaos Engineering — **done**
+- Chaos Mesh deployed via Terraform, and two scenarios plus one meta-monitoring check executed against a live cluster. Results in [`docs/week7-chaos-scorecard.md`](docs/week7-chaos-scorecard.md); summary in [Chaos Engineering](#chaos-engineering) above
+- **Scope deliberately cut from five scenarios to two.** Two scenarios that test the remediator in *both* directions — acting and refusing — proved more than five shallow ones would have. The guard failure in scenario 2 is the finding that justifies the trade
+- Not done, and worth naming: written postmortems per incident, and the optional downstream service for graceful-degradation and tracing. IOChaos was also ruled out — `/dev/fuse` is unavailable on cgroup v2 nodes ([`known-gotchas.md`](docs/known-gotchas.md) #30), which removes the obvious tool for a storage-latency scenario
 
 ### Week 8 — Polish, Security/Cost Pass, and Demo
 - Security pass: network policies, IAM least-privilege review, secrets hygiene
@@ -89,13 +87,47 @@ Both arrows out of Alertmanager come from a *single* receiver: every alert reach
 
 **What it doesn't do.** This stops the bleeding, not the disease: it restores capacity and preserves evidence, but doesn't fix Postgres or the network. Detection takes ~5 minutes end to end (scrape interval, rate window, alert hold, Alertmanager grouping). A service mesh could eject a bad endpoint faster, but would destroy the evidence doing it.
 
+## Chaos Engineering
+
+A remediation system has two correct behaviours, and only one of them is usually tested. It must **act** when one pod is bad, and it must **refuse** when the whole dependency is down — because there, quarantining is worse than doing nothing: every replacement inherits the same fault. Week 7 tested both directions against a live cluster.
+
+Chaos Mesh is deployed by Terraform rather than as a sixth ArgoCD Application, for a specific reason documented in [`known-gotchas.md`](docs/known-gotchas.md) #29.
+
+**Two scenarios and one check, with predictions written down beforehand.**
+
+| | Fault | Real-world analogue | Predicted | Measured |
+|---|---|---|---|---|
+| 1 | Partition one api pod from Postgres | One replica isolated from its database | Auto-remediated | **Auto-remediated — but nearly didn't fire** |
+| 2 | Postgres removed under both api pods | Database backend outage | Guard refuses | **Guard failed. Both pods quarantined** |
+| 3 | Remediator held down 10 min | Monitoring agent outage | Needed a human | **Undetected** |
+
+**Three predictions. Three wrong.** That is the point of running it.
+
+**Scenario 1 worked, and revealed the alert is nearly blind.** The remediator quarantined the bad pod 12 seconds after the alert fired — against a fault it had never been tuned for. But the alert took **13m52s** rather than the predicted 4–6, because `/metrics` sits in its denominator at ~45% of the total, holding the error ratio oscillating between 0.471 and 0.550 against a 0.5 threshold. One PENDING period was abandoned mid-count. The ceiling is ~0.51 — a **2% margin**. The delay is not the problem: **on a shorter fault the alert would not fire at all**, and a pod serving nothing but errors would go unreported.
+
+**Scenario 2 is the honest headline: the `multi_pod` guard did not hold.** Both pods were quarantined, exactly 300 seconds apart, with zero refusals — during an outage where every replacement was equally broken, which is precisely what the guard exists to prevent.
+
+The mechanism is a **self-erasing evidence loop**. Quarantining a pod rewrites its label, dropping it from the Service; the ServiceMonitor scrapes through the Service, so Prometheus stops scraping it and its alert resolves. When the second pod fires, it genuinely *is* the only firing pod. The remediator's own action destroys the evidence its guard reads. Alertmanager grouping worked correctly — two code reviews predicted this failure and both blamed grouping, and both were wrong. **A code review found the risk; only running it found the cause.**
+
+It was **not** a total outage: `readyReplicas` never reached 0 and `MIN_REMAINING_READY` held at every decision. Defence in depth held at the last layer.
+
+**A correction worth recording.** Pre-session analysis claimed the burn-rate SLO alerts would need 45 minutes to 2 hours of sustained injection. They fired in **8 minutes**. That analysis used the *latency* SLO's threshold (0.72) instead of *availability*'s (0.144) — a 5× error — and assumed a 6-hour window contains six hours of history, which is false on a cluster rebuilt 12 minutes earlier: `rate()` computes over the samples that exist.
+
+**No code or alert rule was changed.** The measured behaviour is the artifact; every fix is recorded as a recommendation. Full results, timings, mechanisms and recommended fixes: [`docs/week7-chaos-scorecard.md`](docs/week7-chaos-scorecard.md). Execution steps: [`docs/week7-chaos-runbook.md`](docs/week7-chaos-runbook.md). Manifests: [`chaos/`](chaos/).
+
 ## AWS-native monitoring
 
 CloudWatch Container Insights runs alongside Prometheus and Grafana rather than replacing them. Two monitoring systems only earn their keep if they see different things — these do.
 
 **What only CloudWatch can see.** AWS operates the control plane. The API server itself is scrapable — this cluster scrapes it — but `kube-scheduler`, `kube-controller-manager`, and etcd are not, which is why those scrape jobs are disabled rather than left permanently down. The audit log is out of reach entirely: Prometheus collects metrics, not a per-request record of which ServiceAccount called what. That record is what makes RBAC checkable from outside the cluster instead of taken on trust.
 
-**Watching the watcher.** The remediator watches `railhead-api`, and until now nothing watched the remediator — a real gap rather than a theoretical one, since it runs a single replica and a single replica that dies stays dead. Prometheus can't close it: Prometheus and Alertmanager run in the same cluster and can't reliably alert on a failure that takes them down too. A CloudWatch alarm on the remediator's pod count can, because it sits outside the cluster and survives what it reports on. It treats missing data as breaching — a pod that disappears stops publishing rather than reporting zero, and the default would leave the alarm silent for exactly the failure it exists to catch.
+**Watching the watcher — and the half of it that doesn't work.** The remediator watches `railhead-api`, and nothing watched the remediator: a real gap rather than a theoretical one, since it runs a single replica and a single replica that dies stays dead. Prometheus can't close it, because Prometheus and Alertmanager run in the same cluster and can't reliably alert on a failure that takes them down too. A CloudWatch alarm sits outside the cluster and survives what it reports on. That reasoning still holds, and it is why the alarm lives in CloudWatch rather than Prometheus.
+
+The alarm as built only closes half the gap, and Week 7's chaos testing is what revealed it. Holding the remediator down for ten minutes left it `0/1` Ready, serving zero endpoints, in `CrashLoopBackOff` with 8 restarts — and the alarm never left `OK`, because `service_number_of_running_pods` counts pods in the **`Running` phase**, not ready ones. The pod was running and useless, and the metric reported `1.0` every minute throughout.
+
+So the alarm detects a remediator that is **gone**, not one that is **running but broken** — and running-but-broken is how it actually fails: a crashloop, a deadlock, a hung HTTP server. Reading the Terraform would never have shown this; only injecting the fault did. The `treat_missing_data = "breaching"` setting is still correct and still load-bearing for the case it does cover: a pod that disappears stops publishing rather than reporting zero, and the CloudWatch default would leave the alarm silent for exactly that failure.
+
+The honest fix is an external synthetic probe against the remediator's `/healthz`, which keeps the independence that motivated CloudWatch in the first place. A readiness-derived Prometheus metric would be accurate but would reintroduce the in-cluster dependency the alarm exists to avoid. **Recommended, not implemented** — the measured behaviour is the artifact. Full detail in [`docs/week7-chaos-scorecard.md`](docs/week7-chaos-scorecard.md) and gotcha #34.
 
 **Three alarms, no pager.** Remediator down, node disk over 80% (kubelet starts evicting around 90%), and etcd growth past 100 MB against a 27 MB baseline. None of them notify — Alertmanager already owns routing, and a second delivery path is a second thing that can drift.
 

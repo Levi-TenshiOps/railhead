@@ -337,21 +337,24 @@ Same family as #20 — a shell mangling arguments to a native command — but a 
 <a id="32"></a>
 ### 32. Automated remediation erases the evidence its own guard reads
 
-`railhead-remediator` refuses to quarantine when several pods alert at once, because a shared dependency failing is not one bad pod and every replacement inherits the same fault. A Week 7 chaos experiment took Postgres away from both `railhead-api` replicas and the guard **never engaged**: both pods were quarantined, five minutes apart, with zero refusals.
+**The general pattern: any automated action that removes a component from observation destroys the signal a multi-component guard depends on.** Quarantining, cordoning, draining, scaling to zero, pulling a backend out of a load balancer — each silences the very evidence that would have said "stop, this is systemic." A guard that reads live alert state must account for the fact that acting on one member changes what it can see about the rest.
 
-Alertmanager was not at fault, which is what two paper reviews had predicted. Grouping worked exactly as configured. Two things defeated the guard together.
+**What happened here.** `railhead-remediator` refuses to quarantine when several pods alert at once, because a shared dependency failing is not one bad pod and every replacement inherits the same fault. A Week 7 experiment took Postgres away from both `railhead-api` replicas and the guard **never engaged**: both pods were quarantined, 300 seconds apart (exactly Alertmanager's `group_interval`), with zero refusals.
 
-**The `for: 2m` timers desynchronise.** A genuinely simultaneous fault does not produce simultaneous alerts. The two pods' error ratios crossed the 0.5 threshold about 65 seconds apart, so their `for` windows completed at different times. Prometheus never sends a `pending` alert to Alertmanager, so the first delivery legitimately contained one pod and `multi_pod` was correctly `False`.
+**Why.** Quarantining pod A rewrites its `app` label, dropping it from the Service. The ServiceMonitor scrapes *through* the Service, so Prometheus stops scraping A, its series goes stale, and **A's alert resolves**. When B fires, B genuinely is the only firing pod.
 
-**Quarantining the first pod makes its alert disappear.** The quarantine rewrites the pod's `app` label, which drops it out of the Service. The ServiceMonitor scrapes through the Service, so Prometheus stops scraping that pod, its series goes stale, and its alert resolves. When the second pod fires, it genuinely *is* the only firing pod. The remediator's own action destroyed the signal its guard depends on.
+Two conditions combined, and the guard needed only one:
 
-The second delivery did contain both pods — `send_resolved = true` — but the guard filters to `status == "firing"` before counting, so a resolved pod contributes nothing. The gap between the two quarantines was exactly 300 seconds, Alertmanager's `group_interval`.
+- **`for: 2m` timers desynchronise.** A simultaneous fault does not produce simultaneous alerts — the two error ratios crossed the threshold ~65s apart. Prometheus never sends a `pending` alert, so the first webhook legitimately carried one pod and `multi_pod` was correctly `False`.
+- **The `status == "firing"` filter.** The second webhook *did* contain both pods (`send_resolved = true`), but the guard counts only firing alerts, so the resolved pod contributed nothing.
 
-The `ready_replicas` backstop then failed for a benign reason: the ReplicaSet created a replacement for the first pod, it reached Ready, `readyReplicas` returned to 2, and `ready - 1 >= MIN_REMAINING_READY` passed. **This was not a total outage** — `readyReplicas` never hit 0 and `MIN_REMAINING_READY` held at every decision. Defence in depth held at the last layer. What failed was the layer meant to prevent pointless churn: two pods quarantined and two replacements spawned during an incident where every replacement was equally broken. `MAX_QUARANTINES = 3 / 15min` would have stopped a third.
+Alertmanager grouping worked exactly as configured. Two paper reviews predicted this failure and both blamed grouping; both were wrong.
 
-**Generalise this beyond the remediator.** Any automated action that removes a component from observation destroys the signal a multi-component guard depends on. Quarantining, cordoning, draining, scaling to zero, removing from a load balancer — each of these can silence the very evidence that would have said "stop, this is systemic." A guard that reads live alert state has to account for the fact that acting on one member changes what it can see about the rest.
+**Severity was lower than feared.** The `ready_replicas` backstop was defeated benignly — the ReplicaSet's replacement reached Ready, `readyReplicas` returned to 2, and `ready - 1 >= MIN_REMAINING_READY` passed. But `readyReplicas` never hit 0 and `MIN_REMAINING_READY` held at every decision: **not a total outage.** Defence in depth held at the last layer. What failed was the layer meant to prevent pointless churn — two pods quarantined and two replacements spawned during an incident where every replacement was equally broken. `MAX_QUARANTINES = 3 / 15min` would have stopped a third.
 
-Worth recording as a method point too: both paper reviews predicted this failure and both got the mechanism wrong. The cause is an interaction between the remediator, the Service selector, the ServiceMonitor and Prometheus staleness — not visible in any single file. A code review found the risk; only running it found the cause.
+**What to do.** Count pods from the alert *group* rather than firing-only; or gate on Deployment-level unavailable replicas; or add a cooldown between quarantines. Not applied — the measured behaviour is the artifact.
+
+**Method note.** The cause is an interaction between the remediator, the Service selector, the ServiceMonitor and Prometheus staleness — visible in no single file. A code review found the risk; only running it found the cause.
 
 <a id="33"></a>
 ### 33. `/metrics` sits in the SLO denominator and can stop an alert firing
@@ -369,13 +372,13 @@ This is #24's pattern one layer down. `/health` was recognised as non-representa
 
 `railhead-dev-remediator-down` alarms when Container Insights reports fewer than 1 running pod for the `railhead-remediator` Service. It exists because nothing else watches the remediator, and Prometheus cannot reliably alert on a failure inside its own cluster.
 
-A Week 7 check held the remediator down for ten minutes with Chaos Mesh `pod-failure`. For that entire window the pod was `0/1` Ready with **zero ready endpoints**, repeatedly `CrashLoopBackOff`, accumulating 8 container restarts. The alarm stayed `OK` throughout, and `service_number_of_running_pods` reported exactly `1.0` for **every single minute**.
+**What happened.** A Week 7 check held the remediator down for ten minutes with Chaos Mesh `pod-failure`. Throughout, the pod was `0/1` Ready with **zero ready endpoints**, repeatedly `CrashLoopBackOff`, accumulating 8 restarts. The alarm stayed `OK`, and `service_number_of_running_pods` reported exactly `1.0` for **every single minute**.
 
-The metric is derived from pod **phase**, not from readiness or EndpointSlice membership. `pod-failure` swaps the container image for a pause image, and a pause container runs happily, so the pod stays in `Running` phase and keeps counting as one. The alarm only fires when the pod is **deleted** or the metric **stops publishing entirely** — which is exactly why it fired during teardown, and why that observation proved less than it appeared to.
+**Why.** The metric is derived from pod **phase**, not readiness or EndpointSlice membership. `pod-failure` swaps the container image for a pause image, and a pause container runs happily, so the pod stays in `Running` phase and keeps counting as one. The alarm only fires when the pod is **deleted** or the metric **stops publishing** — exactly why it fired during teardown, and why that observation proved less than it appeared to.
 
-The blind spot is broader than the injected fault. A crashlooping remediator, a deadlocked one, or one whose HTTP server has hung all present the same way: `Running`, not `Ready`, counted as 1. Those are the realistic ways this component fails, and none of them are covered.
+The blind spot is broader than the injected fault: a crashloop, a deadlock, or a hung HTTP server all present identically as `Running`-but-not-`Ready`. Those are the realistic ways this component fails, and none are covered.
 
-The tension is genuine and worth stating rather than fixing carelessly: the alarm lives outside the cluster precisely so it does not share fate with what it watches, and the price of that independence is a coarser signal. A readiness-derived Prometheus metric would be accurate and would reintroduce the dependency the alarm exists to avoid. An external synthetic probe against `/healthz` keeps the independence and is the honest fix.
+**What to do.** An external synthetic probe against `/healthz` is the honest fix. A readiness-derived Prometheus metric would be accurate but reintroduces the in-cluster dependency the alarm exists to avoid — the alarm is coarse *because* it is independent, and that tradeoff is worth keeping deliberately rather than fixing carelessly. Recommended, not implemented.
 
 <a id="35"></a>
 ### 35. A PowerShell pipeline returning one object has no `.Count`
