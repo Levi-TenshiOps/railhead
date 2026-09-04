@@ -40,6 +40,10 @@ end and keep their number permanently, even once a later entry supersedes them.
 29. [Chaos Mesh breaks under ArgoCD because Helm generates its webhook cert at render time](#29)
 30. [`chaos-daemon` logs a `/dev/fuse` ERROR on every node, and mostly does not mean it](#30)
 31. [Git Bash rewrites absolute paths passed to `kubectl exec`](#31)
+32. [Automated remediation erases the evidence its own guard reads](#32)
+33. [`/metrics` sits in the SLO denominator and can stop an alert firing](#33)
+34. [`service_number_of_running_pods` counts pod phase, not readiness](#34)
+35. [A PowerShell pipeline returning one object has no `.Count`](#35)
 
 ---
 
@@ -329,3 +333,57 @@ MSYS_NO_PATHCONV=1 kubectl -n chaos-mesh exec <pod> -- stat -fc %T /sys/fs/cgrou
 ```
 
 Same family as #20 — a shell mangling arguments to a native command — but a different shell and a different mechanism, so both have to be known separately: PowerShell re-quotes, Git Bash re-paths.
+
+<a id="32"></a>
+### 32. Automated remediation erases the evidence its own guard reads
+
+`railhead-remediator` refuses to quarantine when several pods alert at once, because a shared dependency failing is not one bad pod and every replacement inherits the same fault. A Week 7 chaos experiment took Postgres away from both `railhead-api` replicas and the guard **never engaged**: both pods were quarantined, five minutes apart, with zero refusals.
+
+Alertmanager was not at fault, which is what two paper reviews had predicted. Grouping worked exactly as configured. Two things defeated the guard together.
+
+**The `for: 2m` timers desynchronise.** A genuinely simultaneous fault does not produce simultaneous alerts. The two pods' error ratios crossed the 0.5 threshold about 65 seconds apart, so their `for` windows completed at different times. Prometheus never sends a `pending` alert to Alertmanager, so the first delivery legitimately contained one pod and `multi_pod` was correctly `False`.
+
+**Quarantining the first pod makes its alert disappear.** The quarantine rewrites the pod's `app` label, which drops it out of the Service. The ServiceMonitor scrapes through the Service, so Prometheus stops scraping that pod, its series goes stale, and its alert resolves. When the second pod fires, it genuinely *is* the only firing pod. The remediator's own action destroyed the signal its guard depends on.
+
+The second delivery did contain both pods — `send_resolved = true` — but the guard filters to `status == "firing"` before counting, so a resolved pod contributes nothing. The gap between the two quarantines was exactly 300 seconds, Alertmanager's `group_interval`.
+
+The `ready_replicas` backstop then failed for a benign reason: the ReplicaSet created a replacement for the first pod, it reached Ready, `readyReplicas` returned to 2, and `ready - 1 >= MIN_REMAINING_READY` passed. **This was not a total outage** — `readyReplicas` never hit 0 and `MIN_REMAINING_READY` held at every decision. Defence in depth held at the last layer. What failed was the layer meant to prevent pointless churn: two pods quarantined and two replacements spawned during an incident where every replacement was equally broken. `MAX_QUARANTINES = 3 / 15min` would have stopped a third.
+
+**Generalise this beyond the remediator.** Any automated action that removes a component from observation destroys the signal a multi-component guard depends on. Quarantining, cordoning, draining, scaling to zero, removing from a load balancer — each of these can silence the very evidence that would have said "stop, this is systemic." A guard that reads live alert state has to account for the fact that acting on one member changes what it can see about the rest.
+
+Worth recording as a method point too: both paper reviews predicted this failure and both got the mechanism wrong. The cause is an interaction between the remediator, the Service selector, the ServiceMonitor and Prometheus staleness — not visible in any single file. A code review found the risk; only running it found the cause.
+
+<a id="33"></a>
+### 33. `/metrics` sits in the SLO denominator and can stop an alert firing
+
+`RailheadAPIPodErrorRate` and both SLO burn-rate families exclude `handler!="/health"` and nothing else. `/metrics` is instrumented by the same middleware, and Prometheus scrapes it at roughly the rate the worker generates real traffic — so scrape traffic was measured at **~45% of the alert's denominator**.
+
+During a single-pod partition, with *every* `/items` request returning 5xx, the per-pod error ratio ceiling was about `0.05 / (0.05 + 0.048) = 0.51` against a `0.5` threshold. The observed ratio oscillated between **0.471 and 0.550**, and the first `PENDING` period was abandoned mid-count when it dipped, resetting the `for: 2m` timer. Detection took **13m52s** against a predicted 4-6 minutes, and needed two attempts.
+
+The delay is not the problem. **A 2% margin means the alert can fail to fire at all** on a shorter fault, or if the scrape interval were tightened, or if real traffic dropped. The pod would be serving nothing but errors and nothing would say so.
+
+This is #24's pattern one layer down. `/health` was recognised as non-representative traffic and excluded; `/metrics` is equally non-representative and was not. The fix is `handler!~"/health|/metrics"` in all five rules. The generalisable check: **an SLO denominator should contain only traffic a user could generate.** Probe traffic and scrape traffic both dilute it, and dilution always moves the ratio in the direction that hides problems.
+
+<a id="34"></a>
+### 34. `service_number_of_running_pods` counts pod phase, not readiness
+
+`railhead-dev-remediator-down` alarms when Container Insights reports fewer than 1 running pod for the `railhead-remediator` Service. It exists because nothing else watches the remediator, and Prometheus cannot reliably alert on a failure inside its own cluster.
+
+A Week 7 check held the remediator down for ten minutes with Chaos Mesh `pod-failure`. For that entire window the pod was `0/1` Ready with **zero ready endpoints**, repeatedly `CrashLoopBackOff`, accumulating 8 container restarts. The alarm stayed `OK` throughout, and `service_number_of_running_pods` reported exactly `1.0` for **every single minute**.
+
+The metric is derived from pod **phase**, not from readiness or EndpointSlice membership. `pod-failure` swaps the container image for a pause image, and a pause container runs happily, so the pod stays in `Running` phase and keeps counting as one. The alarm only fires when the pod is **deleted** or the metric **stops publishing entirely** — which is exactly why it fired during teardown, and why that observation proved less than it appeared to.
+
+The blind spot is broader than the injected fault. A crashlooping remediator, a deadlocked one, or one whose HTTP server has hung all present the same way: `Running`, not `Ready`, counted as 1. Those are the realistic ways this component fails, and none of them are covered.
+
+The tension is genuine and worth stating rather than fixing carelessly: the alarm lives outside the cluster precisely so it does not share fate with what it watches, and the price of that independence is a coarser signal. A readiness-derived Prometheus metric would be accurate and would reintroduce the dependency the alarm exists to avoid. An external synthetic probe against `/healthz` keeps the independence and is the honest fix.
+
+<a id="35"></a>
+### 35. A PowerShell pipeline returning one object has no `.Count`
+
+`chaos/run-scenario-1.ps1` refused to run on its first real use, reporting `Need 2 ready railhead-api pods, found 0` while `kubectl get pods` showed both pods `1/1 Running`.
+
+The filter was `($_.status.containerStatuses | Where-Object { $_.ready }).Count -gt 0`. In PowerShell 5.1 a pipeline that emits **exactly one** object returns that object, not a collection, and a bare object has no `.Count` property — the expression evaluates to `$null`, and `$null -gt 0` is `$false`. Every single-container pod was therefore classified as not ready. Wrapping the inner pipeline in `@(...)` forces a collection and `.Count` becomes 1.
+
+The script already wrapped its *outer* pipeline in `@()` for this exact reason. Only the inner one was missed, which is the failure mode worth remembering: the idiom is known, and it still gets dropped one level down.
+
+Two lessons. **`@()` around any pipeline whose `.Count` you intend to read**, without exception, because the bug only appears when the result happens to have one element — so it passes every test with two or more and fails on the realistic case. And the fixed version counts *not-ready* containers and requires zero, which is both immune to the same trap and semantically stricter: it requires every container in the pod to be ready rather than at least one.
