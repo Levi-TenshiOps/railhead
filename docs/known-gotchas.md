@@ -357,13 +357,21 @@ The `ready_replicas` backstop was then defeated benignly: the ReplicaSet's repla
 <a id="33"></a>
 ### 33. `/metrics` sits in the SLO denominator and can stop an alert firing
 
-`RailheadAPIPodErrorRate` and both SLO burn-rate families exclude `handler!="/health"` and nothing else. `/metrics` is instrumented by the same middleware, and Prometheus scrapes it at roughly the rate the worker generates real traffic — so scrape traffic was measured at **~45% of the alert's denominator**.
+**Fixed 2026-09-05 — see the end of this entry.** As originally built,
+`RailheadAPIPodErrorRate` and both SLO burn-rate families excluded
+`handler!="/health"` and nothing else. `/metrics` is instrumented by the same middleware, and Prometheus scrapes it at roughly the rate the worker generates real traffic — so scrape traffic was measured at **~45% of the alert's denominator**.
 
 During a single-pod partition, with *every* `/items` request returning 5xx, the per-pod error ratio ceiling was about `0.05 / (0.05 + 0.048) = 0.51` against a `0.5` threshold. The observed ratio oscillated between **0.471 and 0.550**, and the first `PENDING` period was abandoned mid-count when it dipped, resetting the `for: 2m` timer. Detection took **13m52s** against a predicted 4-6 minutes, and needed two attempts.
 
 The delay is not the problem. **A 2% margin means the alert can fail to fire at all** on a shorter fault, or if the scrape interval were tightened, or if real traffic dropped. The pod would be serving nothing but errors and nothing would say so.
 
-This is #24's pattern one layer down. `/health` was recognised as non-representative traffic and excluded; `/metrics` is equally non-representative and was not. The fix is `handler!~"/health|/metrics"` in all five rules. The generalisable check: **an SLO denominator should contain only traffic a user could generate.** Probe traffic and scrape traffic both dilute it, and dilution always moves the ratio in the direction that hides problems.
+This is #24's pattern one layer down. `/health` was recognised as non-representative traffic and excluded; `/metrics` is equally non-representative and was not. The generalisable check: **an SLO denominator should contain only traffic a user could generate.** Probe traffic and scrape traffic both dilute it, and dilution always moves the ratio in the direction that hides problems.
+
+**The fix, applied and re-measured.** `handler!~"/health|/metrics"` in all five rules — note the operator, `!~` not `!=`, because the exclusion is now an alternation, and Prometheus anchors `!~` fully so it matches those two values exactly. Re-running the same scenario unchanged took detection from **13m52s to 5m46s**, with no abandoned `PENDING` and the ratio pinned at **1.0** instead of oscillating with a 2% margin.
+
+Removing `/metrics` does more than speed it up: it makes the ratio **independent of throughput**. With only `/items` in the denominator, a pod failing every request reads 1.0 no matter how far its throughput has collapsed. Measured before injection, `/metrics` was a *fixed* 0.03333/s per pod — one scrape per 30s, load-independent — against `/items` at 0.04444/s. A constant term in a denominator whose other term collapses under fault dilutes worst exactly when detection matters most.
+
+**Verify the change at the right layer.** A malformed regex makes Prometheus reject the entire rule group, leaving *no* per-pod alert — worse than a slow one. `terraform apply` succeeding only proves the ArgoCD Application was written; the rule still has to sync and load. Gate on reading it back: `/api/v1/rules` showing all five rules present with group health `ok`.
 
 <a id="34"></a>
 ### 34. `service_number_of_running_pods` counts pod phase, not readiness

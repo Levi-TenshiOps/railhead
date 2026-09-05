@@ -50,9 +50,12 @@ kubectl -n monitoring port-forward svc/observability-kube-prometh-prometheus 909
 ```
 Service name is `observability-kube-prometh-prometheus` — Helm truncates it.
 
-> **Do not poll the pod's `/metrics` to check progress.** Every read adds a 2xx
-> to the alert denominator and pushes the ratio down; with a 2% margin
-> (gotcha #33) you can suppress the alert by observing it. Query Prometheus.
+> **Do not poll the pod's `/metrics` to check progress.** Query Prometheus
+> instead. This was load-bearing on the first run, when `/metrics` sat in the
+> alert denominator with a 2% margin (gotcha #33) and every read pushed the ratio
+> further down — you could suppress the alert by observing it. The rules now
+> exclude `/metrics`, so the hazard is gone, but the habit is still right: the
+> pod's own counters are not the signal the alert reads.
 
 If nothing changes after 2 minutes, check
 `kubectl -n chaos-mesh describe networkchaos api-postgres-partition` for
@@ -69,9 +72,14 @@ is DB-free, so readiness must not flap.
 ### 2.4 Watch the alert
 `http://127.0.0.1:9090/alerts` → `RailheadAPIPodErrorRate`.
 
-**Measured: FIRING at 13m52s.** PENDING 5m39s → **abandoned** 7m12s → PENDING
-11m49s → FIRING 13m52s. Expect oscillation around the threshold and at least one
-abandoned PENDING. Not a hang.
+**First run (2026-09-04), `/metrics` still in the denominator: FIRING at 13m52s.**
+PENDING 5m39s → **abandoned** 7m12s → PENDING 11m49s → FIRING 13m52s, oscillating
+0.471–0.550 around the threshold.
+
+**Re-run (2026-09-05) after excluding `/metrics`: FIRING at 5m46s.** PENDING
+3m46s, no abandoned period, ratio climbing monotonically to 1.0. This is what to
+expect now — a PENDING that holds and converts. **An abandoned PENDING today
+means something is wrong**, not that the alert is being slow.
 
 > `chaos-scenario1-alert-firing.png` — **not captured**; the alert resolved
 > first. The Slack message proves it fired.

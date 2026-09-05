@@ -1,21 +1,30 @@
 # Week 7 chaos scorecard
 
-Two scenarios plus one check, run **2026-09-04** against a live cluster.
-Predictions were written down before the run and are not edited afterwards.
+Two scenarios plus one check, run **2026-09-04** against a live cluster, with §1
+re-run **2026-09-05** after a fix. Predictions were written down before each run
+and are not edited afterwards.
 
-**Three predictions. Three wrong.**
+**None of these defects were findable by reading the code.** Two independent
+design reviews ran against the remediator beforehand; both predicted §2 would
+fail, and **both named the wrong mechanism**, blaming Alertmanager's grouping —
+which worked correctly throughout. A defect whose cause two careful reviews get
+wrong is one only a live run will explain.
 
 | | Scenario | Predicted | **Measured** |
 |---|---|---|---|
-| **1** | Partition one api pod from Postgres | Auto-remediated, 4–6 min | **Auto-remediated — 13m52s, and it nearly didn't fire** |
-| **2** | Postgres outage under both api pods | Guard refuses | **Guard failed. Both pods quarantined, zero refusals** |
+| **1** | Partition one api pod from Postgres | Auto-remediated, 4–6 min | **Auto-remediated — 13m52s, and it nearly didn't fire.** Fixed and re-run: **5m46s** |
+| **2** | Postgres outage under both api pods | Guard refuses | **Guard did not engage. Both pods quarantined, zero refusals — but no outage** |
 | **3** | Remediator held down 10 min | Needed a human | **Undetected. Alarm never fired** |
 
 Outcomes: Self-healed · Auto-remediated · Correctly refused · Needed a human ·
 **Undetected** — a scenario that reveals a blind spot has succeeded, not failed.
 
-No code or alert rule was changed. The measured behaviour is the artifact; every
-fix below is a recommendation. Commands: [`week7-chaos-runbook.md`](week7-chaos-runbook.md).
+**No code was changed, and the measured behaviour is the artifact** — the findings
+below are recorded as they happened, not patched away. One exception, made
+deliberately: the `/metrics` denominator defect in §1 was fixed and the scenario
+re-run to measure it, because it is a matcher change that can only narrow what the
+rule counts. The before and after are both kept. Everything else stays a
+recommendation. Commands: [`week7-chaos-runbook.md`](week7-chaos-runbook.md).
 Manifests: [`../chaos/`](../chaos/).
 
 ---
@@ -41,8 +50,9 @@ pod name, `duration: 15m`. *Analogue: one replica isolated from its database.*
 13:31:42  quarantined
 ```
 
-**The alert nearly didn't fire.** `/metrics` is instrumented and the rule excludes
-only `handler!="/health"`, so scrape traffic was **~45% of the denominator**:
+**The alert nearly didn't fire.** `/metrics` is instrumented and at the time the
+rule excluded only `handler!="/health"`, so scrape traffic was **~45% of the
+denominator**:
 `/items` 5xx 0.0185/s, `/items` 2xx 0.0407/s, **`/metrics` 2xx 0.0482/s**. With
 every `/items` request failing the ceiling is `0.05 / 0.098 ≈ 0.51` against a 0.5
 threshold — a **2% margin**. The ratio oscillated **0.471–0.550**, so the first
@@ -69,8 +79,66 @@ psycopg2.OperationalError: connection to server at "railhead-postgresql"
 against a 40-thread limiter.
 
 **Evidence:** `chaos-scenario1-remediator-slack.png` ·
-`chaos-scenario1-failure-mechanism.png` ·
-`chaos-scenario1-quarantined-labels.png` · `railhead-alert-rules.png`
+`chaos-scenario1-failure-mechanism.png` · `chaos-scenario1-quarantined-labels.png`
+
+There is deliberately **no screenshot of the pre-fix rules** — `railhead-alert-rules.png`
+was re-captured after the fix and now shows the current expressions. The pre-fix
+matcher is quoted above and preserved in git history; a stale screenshot kept only
+to illustrate a superseded state is a thing that rots.
+
+### The fix, applied and re-measured 2026-09-05
+
+`handler!="/health"` became `handler!~"/health|/metrics"` in all five rules
+([`terraform/modules/argocd/main.tf`](../terraform/modules/argocd/main.tf) — note
+the operator change, `!~` not `!=`, because the exclusion is now an alternation).
+The scenario was re-run unchanged: same manifest, same pod-name targeting, same
+procedure, no `/metrics` polling.
+
+| | Before | **After** |
+|---|---|---|
+| PENDING | 5m39s | **3m46s** |
+| PENDING abandoned | **yes, once** | **none** |
+| FIRING | **13m52s** | **5m46s** |
+| Quarantine | 12s after FIRING | 30s after FIRING |
+| Ratio behaviour | oscillated 0.471–0.550 | climbed monotonically to **1.0000** |
+| Margin over the 0.5 threshold | **2%** | **100%** |
+
+```
+07:56:56  inject
+08:00:42  ratio crosses 0.5  -> PENDING
+08:01:50  ratio 1.0000       (5m window now holds only fault samples)
+08:02:42  FIRING             (5m46s)
+08:03:12  quarantined; replacement Ready, Deployment back to 2/2
+```
+
+**Detection went from 13m52s to 5m46s — 8m06s faster.** The speed is the smaller
+half of it. Removing `/metrics` makes the ratio **independent of throughput**:
+with only `/items` in the denominator, a pod failing every request reads 1.0 no
+matter how far its throughput has collapsed. The old rule's *ceiling* of 0.5102 is
+roughly the value the new rule merely passes through at ~3m30s on the way up.
+
+Measured on the target pod before injection: `/metrics` was a **fixed 0.03333/s**
+— one scrape per 30s, identical on both pods, independent of load — against
+`/items` at 0.04444/s, so **42.9%** of the old denominator. A constant term in a
+denominator whose other term collapses under fault dilutes worst exactly when
+detection matters most.
+
+**Comparability, stated plainly.** The baseline ran on a cluster rebuilt 12
+minutes earlier; this run on one up 24 hours. Pre-fault `/metrics` share was 42.9%
+against the baseline's ~45% measured mid-fault — the same regime, so the numbers
+are comparable, but this is not a controlled A/B and shouldn't be read as one.
+
+This is the one recommendation from Week 7 that was implemented rather than left
+on record, because it is a matcher change with no behavioural risk: it narrows
+what the rule counts and cannot make the alert fire on anything it didn't before.
+The guard defect in §2 stays unfixed on purpose.
+
+**Evidence:** `railhead-alert-rules.png` — all five rules across all three groups
+carrying `handler!~"/health|/metrics"`, verified loaded in Prometheus with group
+health `ok`. Note the operator: `!~`, not `!=`. A malformed regex here makes
+Prometheus reject the whole group and leaves **no** per-pod alert at all, which is
+worse than a slow one — so the change was gated on reading it back from
+`/api/v1/rules` rather than on `terraform apply` reporting success.
 
 ---
 
@@ -144,8 +212,9 @@ Fix and the independence tradeoff: gotcha #34.
 
 **Captured (6):** `chaos-scenario1-remediator-slack` ·
 `chaos-scenario1-failure-mechanism` · `chaos-scenario1-quarantined-labels` ·
-`railhead-alert-rules` · `chaos-scenario2-grouped-alert` ·
-`chaos-scenario2-cascade-state`
+`chaos-scenario2-grouped-alert` · `chaos-scenario2-cascade-state` ·
+`railhead-alert-rules` (**re-captured 2026-09-05** after the §1 fix — it shows the
+rules as they stand now, not as they were during the 13m52s run)
 
 **Three planned screenshots do not exist. Each absence is a result:**
 

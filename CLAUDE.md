@@ -58,7 +58,7 @@ Concretely:
   does NOT delete what it deployed. The namespaces must be deleted
   explicitly, or the EBS volumes orphan and bill indefinitely.
 - Verify every apply/destroy independently via AWS CLI rather than
-  trusting Terraform's own report — the nine-check orphan sweep is
+  trusting Terraform's own report — the ten-check orphan sweep is
   step 6 of the teardown doc.
 - Flag screenshot moments only for things with no permanent record
   otherwise (live console views, one-time terminal output). GitHub

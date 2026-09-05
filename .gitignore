@@ -6,6 +6,7 @@
 !*.tfvars.example
 crash.log
 crash.*.log
+*.tfplan
 override.tf
 override.tf.json
 *_override.tf
@@ -31,3 +32,8 @@ Thumbs.db
 # Chaos experiment renders -- contain a pod name valid for one cluster
 # lifetime only (chaos/run-scenario-1.ps1 regenerates them).
 chaos/experiments/.rendered-*.yaml
+
+# Diagram working files: the mingrammer source, the detailed variant, and the
+# SVG exports. Only the generated railhead-architecture-simple.png ships, and
+# it lives in screenshots/ with every other image.
+Architecture/

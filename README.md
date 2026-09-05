@@ -1,30 +1,26 @@
-> **Status:** Weeks 1-6 of 8 complete — infrastructure, CI/CD, GitOps, observability (metrics, logs, alerting), and automated remediation are all done and verified. Next up: chaos engineering (Week 7), then final polish (Week 8).
+> **Status: complete as of 2026-09-05.** Built and verified against a live AWS account: Terraform-provisioned infrastructure, CI/CD with OIDC and image scanning, GitOps delivery through ArgoCD, observability with SLO burn-rate alerting, automated pod remediation, AWS-native monitoring, and chaos engineering.
+>
+> The known `multi_pod` guard defect is left unfixed on purpose, so the measured failure stays on record.
 
 # Railhead — Production-Grade SRE Platform on AWS
 
 Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and now monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account, not just configured and left untested.
 
-Automated remediation is already built: when a pod is serving majority errors while its siblings stay healthy, a script quarantines it — relabeling it out of the Service and ReplicaSet selectors so traffic stops and a healthy replacement is created, while the broken pod keeps running for inspection. One piece is still ahead: chaos engineering, deliberately injecting the kinds of failures I've actually diagnosed running production VxRail/vSAN clusters at Dell — storage latency, DNS misconfiguration, cert expiry, disk pressure — and measuring how much of that the system catches on its own.
+Automated remediation is built: when a pod is serving majority errors while its siblings stay healthy, a script quarantines it — relabeling it out of the Service and ReplicaSet selectors so traffic stops and a healthy replacement is created, while the broken pod keeps running for inspection.
 
-Full status: see Architecture below for what's built, Roadmap for what's left.
+**Then I tried to break it, and it broke.** Chaos engineering injected real faults into the live cluster, with predictions written down first, and found a genuine defect in my own remediator: a guard designed to refuse acting when a shared dependency fails — where every replacement would be equally broken — did not engage. It quarantined both replicas during exactly the outage it exists to prevent, because its own first action erased the evidence its second decision depended on. **Two independent design reviews predicted that failure in advance and both named the wrong cause.** It was only findable by running it, and it is written up in full rather than quietly fixed: [Chaos Engineering](#chaos-engineering).
 
 ## Why "Railhead"
 
 A railhead is where a rail line physically ends and cargo transfers onward to its next mode of transport — that's the metaphor: code "arrives" from git here and gets carried into running infrastructure. It's also a nod to VxRail, the hyperconverged platform I've supported in production for years. The name sits at the intersection of both.
 
-## Architecture — what's built so far
+## Architecture
 
 Everything below is live and verified against a real AWS account — nothing here is aspirational.
 
-```mermaid
-flowchart LR
-    dev([Developer]) -->|git push| gh[GitHub]
-    gh -->|OIDC, no static keys| ci[Actions: build + Trivy gate]
-    ci -->|push image| ecr[(ECR)]
-    gh -->|watches main| argo[ArgoCD: selfHeal + prune]
-    argo -->|deploys| eks[EKS cluster]
-    ecr -.->|image pull| eks
-```
+![Railhead architecture: developer push through GitHub Actions and Trivy into ECR, ArgoCD syncing the api pods, Prometheus and Alertmanager driving the remediator, Chaos Mesh injecting faults inside the cluster and CloudWatch observing from outside it](screenshots/railhead-architecture-simple.png)
+
+Read it as three loops. **Delivery** runs left to right: a push builds and scans an image into ECR, while ArgoCD separately watches `main` and deploys — two paths that never cross. **Detection and repair** is the cycle in the middle: Prometheus scrapes the api pods, hands firing alerts to Alertmanager, and Alertmanager both notifies Slack and calls the remediator, which relabels the bad pod out of the Service so a replacement is created. **Verification** is the two components at the edges: Chaos Mesh sits *inside* the cluster injecting faults (deployed by Terraform rather than ArgoCD, for reasons in [Known Gotchas](docs/known-gotchas.md) #29), and CloudWatch sits *outside* the cluster boundary — which is precisely why it can still report on a failure that takes the in-cluster monitoring down with it.
 
 Two paths lead into the cluster and they never cross: container images travel through GitHub Actions into ECR, while *configuration* travels through ArgoCD. CI holds no cluster credentials and never runs `kubectl`; ArgoCD holds no AWS credentials. Neither one can do the other's job, which is the point.
 
@@ -38,26 +34,13 @@ Two paths lead into the cluster and they never cross: container images travel th
 - **GitOps** ([`terraform/modules/argocd`](terraform/modules/argocd)): ArgoCD deploys the app from a git-tracked `Application`, with `selfHeal` and `prune` on — no one runs `helm install` by hand anymore. Proven, not just configured: scaling the API to 0 by hand was reverted back to 2 replicas in about a second, with zero human involvement.
 - **Metrics** (`terraform/modules/argocd`, kube-prometheus-stack): Prometheus and Grafana, deployed as their own ArgoCD Application. The API exposes `/metrics` via `prometheus-fastapi-instrumentator`. Dashboards are code — JSON committed to the repo, auto-loaded by Grafana's sidecar — so wiping the Grafana PVC doesn't lose them.
 - **Logs** (`terraform/modules/argocd`, Loki + Grafana Alloy): Loki aggregates logs cluster-wide (S3-backed, 7-day retention), shipped by Alloy as a DaemonSet. Alloy over the older Promtail specifically because Promtail hit end-of-life in March 2026. Grafana picks up Loki the same way it picks up dashboards — a labeled ConfigMap.
-- **Alerting** (`terraform/modules/argocd`, Alertmanager): two SLOs — 99% availability (5xx only; a bad client request isn't a service failure, so 4xx doesn't count) and 95% of requests under 300ms. Both exclude `/health`: probe traffic outnumbers real traffic roughly 6:1 here and never fails, so counting it would dilute both SLOs in the direction that hides problems. Each gets the burn-rate math the Google SRE Workbook recommends: a fast/critical rule (14.4x the sustainable rate, sustained over both a 1-hour and 5-minute window) and a slower/warning one (6x, over 6 hours and 30 minutes). Alertmanager posts both severities to one Slack channel, color- and emoji-coded so you can tell them apart at a glance. Proven live: I took Postgres offline, threw a burst of traffic at the API, and watched the alert land in Slack. There's a [runbook](docs/runbooks/api-high-error-rate.md) for what to do when it fires.
-- **Automated remediation** (`app/remediator`, `kubernetes/helm-charts/railhead-remediator`): a Flask webhook receiver that Alertmanager posts to. On a per-pod error-rate alert, it quarantines the pod — relabeling it out of both the Service and ReplicaSet selectors in one patch, so traffic stops and a healthy replacement is created immediately, while the broken pod keeps running for inspection and is deleted after a TTL. Guarded against acting where it shouldn't: refuses if quarantining would leave no pod serving traffic, if multiple pods are alerting at once (a shared failure, not one bad pod), or if it's already quarantined 3 pods in 15 minutes. Full reasoning in the dedicated section below.
-
-## Roadmap
-
-### Week 7 — Chaos Engineering — **done**
-- Chaos Mesh via Terraform; two scenarios and one meta-monitoring check run against a live cluster. See [Chaos Engineering](#chaos-engineering) above
-- **Scope deliberately cut from five scenarios to two** — testing the remediator in both directions proved more than five shallow scenarios would have, and the guard failure justifies the trade
-- Not done: written postmortems per incident, and the optional downstream service for graceful degradation and tracing. IOChaos was ruled out — `/dev/fuse` is unavailable on cgroup v2 nodes ([`known-gotchas.md`](docs/known-gotchas.md) #30), removing the obvious tool for a storage-latency scenario
-
-### Week 8 — Polish, Security/Cost Pass, and Demo
-- Security pass: network policies, IAM least-privilege review, secrets hygiene
-- Cost pass: right-sizing, revisit Spot instances for nodes
-- Decide how to deliberately use remaining AWS credits on something higher-value (candidates already on record: temporary production-scale demo config, EFK built alongside Loki as a comparison, Karpenter, or a multi-region DR simulation stretch)
-- Final README pass, architecture diagram, clean commit history
-- Demo video
+- **Alerting** (`terraform/modules/argocd`, Alertmanager): two SLOs — 99% availability (5xx only; a bad client request isn't a service failure, so 4xx doesn't count) and 95% of requests under 300ms. All five rules exclude `/health` and `/metrics`: neither is user traffic, and both dilute the denominator in the direction that hides problems. Probe traffic outnumbers real traffic roughly 6:1 and never fails. `/metrics` is worse in a subtler way — it is scraped on a fixed interval, so as real throughput collapses under fault the scrape share *rises*, weakening the signal exactly when it is needed. That was measured, not assumed, and cost 8 minutes of detection time before it was fixed ([Chaos Engineering](#chaos-engineering)). Each gets the burn-rate math the Google SRE Workbook recommends: a fast/critical rule (14.4x the sustainable rate, sustained over both a 1-hour and 5-minute window) and a slower/warning one (6x, over 6 hours and 30 minutes). Alertmanager posts both severities to one Slack channel, color- and emoji-coded so you can tell them apart at a glance. Proven live: I took Postgres offline, threw a burst of traffic at the API, and watched the alert land in Slack. There's a [runbook](docs/runbooks/api-high-error-rate.md) for what to do when it fires.
+- **Automated remediation** (`app/remediator`, `kubernetes/helm-charts/railhead-remediator`): a Flask webhook receiver that Alertmanager posts to. On a per-pod error-rate alert, it quarantines the pod — relabeling it out of both the Service and ReplicaSet selectors in one patch, so traffic stops and a healthy replacement is created immediately, while the broken pod keeps running for inspection and is deleted after a TTL. Guarded against acting where it shouldn't: it refuses if quarantining would leave no pod serving traffic, and after 3 quarantines in 15 minutes. A third guard, meant to refuse when several pods alert at once, **was disproven by chaos testing** — it is documented as broken rather than quietly fixed, because that is what "verified" has to mean. Full reasoning and the measured failure in the dedicated section below.
+- **Chaos engineering** ([`terraform/modules/chaos-mesh`](terraform/modules/chaos-mesh), [`chaos/`](chaos/)): Chaos Mesh 2.8.4, deployed by Terraform rather than as an ArgoCD Application — its CRDs and admission webhooks defeat ArgoCD's sync ordering ([Known Gotchas](docs/known-gotchas.md) #29). The experiment manifests in [`chaos/`](chaos/) are hand-applied and deleted afterwards, deliberately never deployed state, so the GitOps boundary stays clean. Results: [Chaos Engineering](#chaos-engineering) below.
 
 ## Cost approach
 
-Built and torn down incrementally, not left running. The expensive resources — EKS control plane, node group, NAT Gateway — come down at the end of every session and go back up at the start of the next. **Teardown is one Terraform command; the rebuild is not** — it needs three targeted passes plus a manual CRD bootstrap, because a single apply can't sequence ArgoCD's CRDs ahead of the resources that require them. Both are written up step by step, with expected output: [teardown](docs/teardown-sequence.md), [rebuild](docs/rebuild-sequence.md). Together they run about $0.31/hour at list price, so a working session costs roughly a dollar instead of the ~$227/month they'd cost left running.
+Built and torn down incrementally, not left running. The expensive resources — EKS control plane, node group, NAT Gateway — come down at the end of every session and go back up at the start of the next. **Neither direction is a single command.** Teardown is a six-step documented sequence: the ArgoCD Applications and then the namespaces they deployed into must be deleted by hand *before* Terraform runs, because deleting an Application does not delete what it created — skip that and the EBS volumes orphan and bill indefinitely. Only step 5 is a `terraform destroy`. The rebuild is longer still: three targeted passes plus a manual CRD bootstrap, because a single apply can't sequence ArgoCD's CRDs ahead of the resources that require them. Both are written up step by step, with expected output and a ten-check orphan sweep: [teardown](docs/teardown-sequence.md), [rebuild](docs/rebuild-sequence.md). Together they run about $0.31/hour at list price, so a working session costs roughly a dollar instead of the ~$227/month they'd cost left running.
 
 What persists between sessions is deliberately the cheap half: the S3/DynamoDB state backend, the IAM roles, the ECR repositories, and the S3 bucket holding Loki's log chunks. That's well under $1/month in total, almost all of it ECR image storage — worth paying so nothing has to be rebuilt from scratch. A $50/month budget alarm and a zero-spend alert back the whole thing up. Both live at the account level rather than in this repo's Terraform — deliberately, so that tearing down the workload can never take the spend guardrails down with it.
 
@@ -69,7 +52,15 @@ What persists between sessions is deliberately the cheap half: the S3/DynamoDB s
 
 **What the remediator does.** On a per-pod error-rate alert it patches the pod's `app` label to `railhead-api-quarantined`. That one change hits two selectors at once: the Service stops routing to it, and the ReplicaSet sees itself short a pod and creates a healthy one. The broken pod keeps running, orphaned, so it can still be inspected — then it's deleted after a 60-minute TTL.
 
-**Three guards.** It refuses to act if quarantining would leave nothing serving traffic, if several pods are alerting at once (a shared failure — any replacement would be equally broken), or after 3 quarantines in 15 minutes (a bad deployment, not one bad pod). Every refusal is posted to Slack.
+**Three guards — and one of them does not work.** It refuses to act if quarantining would leave nothing serving traffic, and after 3 quarantines in 15 minutes (a bad deployment, not one bad pod). Every refusal is posted to Slack. A third guard is meant to refuse when several pods are alerting at once — a shared failure, where any replacement would be equally broken. **Chaos testing proved it does not hold.** Both api pods were quarantined 300s apart with zero refusals, during exactly the outage the guard exists to prevent.
+
+**Why it failed.** The guard reads a single webhook payload and counts pods whose alert is still `firing` in it. Two things break that. Alertmanager's `group_interval` is 5 minutes and the two pods' `for: 2m` timers desynchronised by 65s, so they arrived in *separate* payloads. And quarantining the first pod drops it out of the Service — the ServiceMonitor scrapes *through* the Service, so Prometheus stops scraping it and its alert **resolves**. By the time the second payload arrived, the first pod was no longer firing and the second genuinely was the only one. **The remediator's own action erases the evidence its next decision depends on.**
+
+The synthetic guard test passed because a hand-written payload contained both pods at once. Real Alertmanager never sends that payload. The code was correct and the test was wrong — which is the more transferable lesson.
+
+**What held.** `MIN_REMAINING_READY` refused at every decision point: `readyReplicas` never reached 0, so this was degradation, not an outage. Defence in depth held at the last layer. What failed was the layer meant to prevent churn.
+
+**The fix — recommended, not implemented.** Count pods *recently acted on* rather than pods *currently firing*, using the 15-minute history the remediator already keeps for `MAX_QUARANTINES`. It stays unimplemented on purpose: the measured behaviour is the artifact of this project, and a defect that gets silently patched teaches nobody anything. Mechanism in full: [Known Gotchas](docs/known-gotchas.md) #32 and the [chaos scorecard](docs/week7-chaos-scorecard.md).
 
 ```mermaid
 flowchart LR
@@ -85,29 +76,51 @@ Both arrows out of Alertmanager come from a *single* receiver: every alert reach
 
 **Proven live.** A real pod's DNS was broken and its Postgres connections killed from the server side, producing genuine 500s while `/health` stayed green. The alert fired, the pod was quarantined, a replacement was scheduled, and an untouched control pod confirmed the fault stayed isolated. The fault-injection method is recorded in [`docs/remediator-t2-trigger-validation.md`](docs/remediator-t2-trigger-validation.md); the quarantine itself is in the screenshots below.
 
-**What it doesn't do.** This stops the bleeding, not the disease: it restores capacity and preserves evidence, but doesn't fix Postgres or the network. Detection takes ~5 minutes end to end (scrape interval, rate window, alert hold, Alertmanager grouping). A service mesh could eject a bad endpoint faster, but would destroy the evidence doing it.
+**What it doesn't do.** This stops the bleeding, not the disease: it restores capacity and preserves evidence, but doesn't fix Postgres or the network. Detection takes **~5 minutes** end to end (scrape interval, rate window, alert hold, Alertmanager grouping) — measured at **5m46s** against a network partition. It was **13m52s** until chaos testing found `/metrics` diluting the alert's denominator; that story is in [Chaos Engineering](#chaos-engineering) below, and it is a good illustration that this floor holds only while the denominator is honest. A service mesh could eject a bad endpoint faster, but would destroy the evidence doing it.
 
 ## Chaos Engineering
 
-A remediation system has two correct behaviours and only one is usually tested: it must **act** on one bad pod, and **refuse** when the whole dependency is down, because there every replacement inherits the same fault. Week 7 tested both directions on a live cluster, with predictions written down first.
+Before this, the remediator had only ever been validated against a fault built by hand to trigger it. That proves the code path runs. It proves nothing about how the system behaves when a failure arrives on its own terms. **Chaos engineering exists to find where a system does not do what its design says — before a real incident finds it instead.**
+
+Two scenarios were chosen to test the remediator in both directions, because a remediation system has two correct behaviours and only one is usually tested: it must **act** on one bad pod, and **refuse** when the shared dependency is down, since there every replacement inherits the same fault. A third check pointed the same question at the monitoring itself. Predictions were written down before each run and are not edited afterwards.
 
 | | Fault | Analogue | Predicted | Measured |
 |---|---|---|---|---|
-| 1 | Partition one api pod from Postgres | Replica isolated from its database | Auto-remediated | **Auto-remediated — but nearly didn't fire** |
-| 2 | Postgres removed under both api pods | Database backend outage | Guard refuses | **Guard failed. Both pods quarantined** |
+| 1 | Partition one api pod from Postgres | Replica isolated from its database | Auto-remediated | **Auto-remediated correctly — but the alert nearly didn't fire** |
+| 2 | Postgres removed under both api pods | Database backend outage | Guard refuses | **Guard did not engage. Both pods quarantined — no outage** |
 | 3 | Remediator held down 10 min | Monitoring agent outage | Needed a human | **Undetected** |
 
-**Three predictions. Three wrong.** That is the point of running it.
+**None of these defects were findable by reading the code.** Two independent design reviews were run beforehand. Both predicted scenario 2 would fail, and **both named the wrong mechanism** — each blamed Alertmanager's grouping, which turned out to work correctly throughout. A defect whose cause two careful reviews get wrong is a defect only a live run will explain. That is the argument for chaos engineering, and it is the thing this section is really about.
 
-**Scenario 1 worked and exposed a nearly-blind alert.** The remediator quarantined the bad pod 12s after firing — against a fault it was never tuned for. But detection took **13m52s**, not 4–6 minutes, because `/metrics` sits in the alert's denominator at ~45% of it, holding the error ratio oscillating 0.471–0.550 across a 0.5 threshold; one PENDING period was abandoned mid-count. The ceiling is ~0.51, a **2% margin**. The delay is not the problem — **on a shorter fault the alert would not fire at all.**
+### Scenario 1 — the system worked
 
-**Scenario 2 is the headline: the `multi_pod` guard did not hold.** Both pods were quarantined 300s apart with zero refusals, during an outage where every replacement was equally broken — precisely what the guard exists to prevent. The cause is a **self-erasing evidence loop**: quarantining a pod drops it from the Service, so Prometheus stops scraping it and its alert resolves, and the second pod genuinely becomes the only one firing. The remediator's own action destroys the evidence its guard reads. Alertmanager grouping worked correctly; two code reviews predicted this failure and both blamed grouping. **A code review found the risk; only running it found the cause.**
+The remediator was pointed at a fault it was never tuned for: a network partition between one replica and Postgres, nothing like the connection-pool corruption it was built around. **It handled it correctly.** The right pod was identified and quarantined 12s after the alert fired, dropped from the Service, and a healthy replacement was serving traffic ~30s later — with the broken pod left running for inspection. The sibling never alerted and never left the EndpointSlice. That is the design doing exactly what it was built to do, against a failure mode it had not seen.
 
-Not a total outage — `readyReplicas` never reached 0 and `MIN_REMAINING_READY` held at every decision.
+What the scenario exposed was the *alert* underneath it, not the remediator. Detection took **13m52s** instead of the predicted 4–6 minutes, and the reason matters more than the delay: `/metrics` sat in the alert's denominator at ~45%, holding the error ratio oscillating 0.471–0.550 across a 0.5 threshold with a ceiling of 0.51 — a **2% margin** — and one PENDING period was abandoned mid-count. **On a shorter fault the alert would not have fired at all**, and a pod serving nothing but errors would have gone unreported.
+
+**This one was fixed and re-measured.** Excluding `/metrics` from all five rules took detection to **5m46s**, with no abandoned PENDING and the ratio pinned at **1.0** — a 100% margin instead of 2%. Why the gap existed is the more useful part: `/metrics` is scraped on a fixed 30s interval, while `/items` throughput *collapses* under fault because every failed request blocks 5s on `connect_timeout`. A constant term in a denominator whose other term collapses dilutes worst exactly when detection matters most.
+
+### Scenario 2 — a real defect, and the layer that caught it
+
+**The `multi_pod` guard did not engage.** Both api pods were quarantined 300s apart with zero refusals, during precisely the shared-dependency outage the guard exists to prevent. The mechanism is dissected under [Automated Remediation](#automated-remediation) above: the guard counts pods still `firing` in a single webhook payload, and quarantining the first pod drops it from the Service, stops Prometheus scraping it, and resolves its own alert — so the remediator erases the evidence its next decision depends on. Alertmanager's grouping, which both reviews blamed, worked correctly throughout.
+
+**What the failure actually cost, measured rather than assumed: no outage.** `readyReplicas` traced **1,1,1,1,2,2,1,2,2,2** and never reached 0. `MIN_REMAINING_READY` refused every action that would have left the Service empty, at every decision point. The guard that failed is the one preventing unnecessary *churn*; the guard preventing an *outage* held. **That is defence in depth working as intended** — one control failing is the exact case the others exist for, and this is the run that proved they do.
+
+The cost was real but bounded: two pods quarantined and two replacements spawned during an outage where every replacement was equally broken. `MAX_QUARANTINES = 3 / 15min` would have stopped a third. The defect stays recorded rather than patched — see the closing note.
+
+### Check 3 — a blind spot in the monitoring itself
+
+Holding the remediator down for 10 minutes left it `0/1` Ready, zero endpoints, `CrashLoopBackOff`, 8 restarts — and the CloudWatch alarm **never left `OK`**. `service_number_of_running_pods` counts pods in the `Running` *phase*, not ready ones, so it reported `1.0` every minute while the pod was running and useless. The alarm had previously only ever fired during teardown, when the agent itself was being destroyed — a trivial path, not the one it exists for. Detail and the fix tradeoff: [AWS-native monitoring](#aws-native-monitoring) below.
 
 **One correction worth recording.** Pre-session analysis said the burn-rate SLO alerts would need 45 min – 2 h of sustained injection. They fired in **8 minutes**: the analysis used the *latency* SLO's threshold (0.72) instead of *availability*'s (0.144), and assumed a 6-hour window holds six hours of history — false on a cluster rebuilt 12 minutes earlier, since `rate()` computes over the samples that exist.
 
-No code or alert rule was changed; every fix is a recommendation. Full numbers and mechanisms: [`docs/week7-chaos-scorecard.md`](docs/week7-chaos-scorecard.md). Commands: [`docs/week7-chaos-runbook.md`](docs/week7-chaos-runbook.md). Manifests: [`chaos/`](chaos/). Why Chaos Mesh runs via Terraform rather than ArgoCD: [`known-gotchas.md`](docs/known-gotchas.md) #29.
+### What the exercise produced
+
+One component **validated** against a fault it was never tuned for. One **defect found**, with its mechanism understood down to the 65s timer desynchronisation and a specific fix identified. One **monitoring blind spot found** before it mattered, in an alarm that had only ever fired on a trivial path. And one alert defect **fixed and re-measured** — 13m52s to 5m46s.
+
+Only that last one was applied. Everything else stays a recommendation on purpose: the measured behaviour is the artifact of this project, and a guard that silently starts working, with no record of why it didn't, teaches nobody anything.
+
+Full numbers and mechanisms: [`docs/week7-chaos-scorecard.md`](docs/week7-chaos-scorecard.md). Commands: [`docs/week7-chaos-runbook.md`](docs/week7-chaos-runbook.md). Manifests: [`chaos/`](chaos/). Why Chaos Mesh runs via Terraform rather than ArgoCD: [`known-gotchas.md`](docs/known-gotchas.md) #29.
 
 ## AWS-native monitoring
 
@@ -135,7 +148,7 @@ Real problems hit while building this, kept in [`docs/known-gotchas.md`](docs/kn
 
 ## Screenshots
 
-I wanted actual proof here, not just claims — so this folder has real `terraform apply`/`destroy` output, AWS Console views, `kubectl`/ArgoCD/Grafana output, and Slack alerts, organized by component under `screenshots/`. I only capture things that don't already have a permanent record somewhere else. The four below are the headline proofs; the rest are grouped by component in the collapsible sections under them.
+I wanted actual proof here, not just claims — so this folder has real `terraform apply`/`destroy` output, AWS Console views, `kubectl`/ArgoCD/Grafana output, and Slack alerts, organized by component under `screenshots/`. I only capture things that don't already have a permanent record somewhere else. The five below are the headline proofs; the rest are grouped by component in the collapsible sections under them.
 
 Self-heal proof: manually scaling the API to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to 2 replicas by ArgoCD, with zero human intervention:
 ![kubectl events showing ArgoCD self-heal reverting a manual scale-to-zero](screenshots/argocd-selfheal.png)
@@ -148,6 +161,9 @@ A real quarantine, triggered by an actual DNS-corruption fault injection, not a 
 
 Pods after quarantine: the broken pod relabeled to `railhead-api-quarantined`, its replacement already `Running` alongside the untouched control pod:
 ![kubectl get pods --show-labels showing the quarantined pod and its replacement](screenshots/remediator-pods-after.png)
+
+The guard failure, caught live: **both** api pods quarantined during a shared-dependency outage, which is exactly what the `multi_pod` guard exists to prevent. This is the most useful artifact in the repo — a defect in my own automation, found by running it rather than by reading it:
+![kubectl output showing both api pods quarantined and their replacements during the Postgres outage](screenshots/chaos-scenario2-cascade-state.png)
 
 <details>
 <summary><b>VPC (3 screenshots)</b></summary>
@@ -252,7 +268,7 @@ Grafana Explore, Loki datasource, a live LogQL query pulling real `railhead-api`
 All 5 ArgoCD Applications `Synced`/`Healthy` with the remediator deployed:
 ![ArgoCD showing all 5 Applications Synced and Healthy](screenshots/remediator-argocd-healthy.png)
 
-Guard rails refusing to act: an unknown alert observed, a valid alert missing its pod label, a nonexistent pod, and two pods alerting at once — all correctly refused, none of them touched a label:
+Guard rails refusing to act across four synthetic payloads: an unknown alert observed, a valid alert missing its pod label, a nonexistent pod, and two pods alerting at once — all correctly refused, none of them touched a label. **Worth reading alongside the chaos results:** the fourth case is the `multi_pod` guard working exactly as designed, and chaos testing later showed real Alertmanager never sends the payload this test sends. The code was right; the test was wrong. That gap between a passing synthetic test and live behaviour is the most useful thing in this repo:
 ![Slack showing the remediator's guard refusals across four synthetic test payloads](screenshots/remediator-guard-refusal.png)
 
 EndpointSlice after quarantine: only the two healthy pod IPs remain — the quarantined pod's IP is gone:
@@ -260,6 +276,29 @@ EndpointSlice after quarantine: only the two healthy pod IPs remain — the quar
 
 Grafana's error-rate panel, showing the fault's entire lifecycle: a clean spike as the fault took hold, holding while the pod kept serving broken traffic, then a sharp drop back to zero the moment quarantine restored capacity:
 ![Grafana error rate panel showing spike and recovery around the quarantine event](screenshots/remediator-grafana-recovery.png)
+
+</details>
+
+<details>
+<summary><b>Chaos engineering (6 screenshots)</b></summary>
+
+The Chaos Mesh dashboard with the scenario 1 NetworkChaos experiment running — the partition between one api pod and Postgres, injected by hand and deleted afterwards:
+![Chaos Mesh dashboard showing the api-postgres-partition experiment](screenshots/chaos-mesh-dashboard.png)
+
+The failure mechanism, measured rather than assumed: probed latency of **5.10s / 5.01s / 5.01s** on the partitioned pod — precisely `connect_timeout=5`, confirming the 5xx come from failed *new* connections rather than the pooled one:
+![Terminal output showing 5.10s, 5.01s and 5.01s failure latencies against the partitioned pod](screenshots/chaos-scenario1-failure-mechanism.png)
+
+Scenario 1's quarantine in Slack, 12s after the alert fired — against a network partition the remediator was never tuned for:
+![Slack message showing the remediator quarantining the partitioned api pod](screenshots/chaos-scenario1-remediator-slack.png)
+
+Labels after that quarantine: `app` rewritten to `railhead-api-quarantined` plus the `railhead.io/quarantined-at` timestamp, which is what drops the pod out of both the Service and the ReplicaSet selector:
+![kubectl get pods --show-labels showing the quarantine labels on the partitioned pod](screenshots/chaos-scenario1-quarantined-labels.png)
+
+Scenario 2's grouped alert — both api pods failing at once under the Postgres outage. Alertmanager's grouping worked correctly here; the guard still didn't engage, for reasons in [Chaos Engineering](#chaos-engineering) above:
+![Alertmanager showing both api pods grouped in one firing alert](screenshots/chaos-scenario2-grouped-alert.png)
+
+The alert rules as they stand **after** the `/metrics` fix — all five carrying `handler!~"/health|/metrics"`, across all three rule groups, loaded and healthy in Prometheus:
+![Prometheus alerts page showing all five railhead rules with the /health and /metrics exclusion](screenshots/railhead-alert-rules.png)
 
 </details>
 
