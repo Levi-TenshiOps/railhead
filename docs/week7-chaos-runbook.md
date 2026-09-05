@@ -74,7 +74,7 @@ is DB-free, so readiness must not flap.
 
 **First run (2026-09-04), `/metrics` still in the denominator: FIRING at 13m52s.**
 PENDING 5m39s → **abandoned** 7m12s → PENDING 11m49s → FIRING 13m52s, oscillating
-0.471–0.550 around the threshold.
+0.438–0.550 around the threshold.
 
 **Re-run (2026-09-05) after excluding `/metrics`: FIRING at 5m46s.** PENDING
 3m46s, no abandoned period, ratio climbing monotonically to 1.0. This is what to
@@ -149,7 +149,8 @@ grep -cE "POST /webhook" <remediator log>
 grep -E "Quarantined|Refusing" <remediator log>
 ```
 **Measured: it did not.** Both pods quarantined **300s apart**, zero refusals,
-two webhooks each carrying one firing pod. Mechanism: scorecard §2, gotcha #32.
+two webhooks each carrying one firing pod. Mechanism: the scorecard's scenario 2
+section, and gotcha #32.
 
 > `chaos-scenario2-grouped-alert.png` · `chaos-scenario2-cascade-state.png`
 > `chaos-scenario2-multipod-refusal-slack.png` — **does not exist; there was no

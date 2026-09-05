@@ -44,6 +44,7 @@ end and keep their number permanently, even once a later entry supersedes them.
 33. [`/metrics` sits in the SLO denominator and can stop an alert firing](#33)
 34. [`service_number_of_running_pods` counts pod phase, not readiness](#34)
 35. [A PowerShell pipeline returning one object has no `.Count`](#35)
+36. [A number read off a rendered UI is not a measurement](#36)
 
 ---
 
@@ -348,7 +349,9 @@ Two conditions combined, and the guard needed only one:
 
 Alertmanager grouping worked exactly as configured. Two paper reviews predicted this failure and both blamed grouping; both were wrong.
 
-The `ready_replicas` backstop was then defeated benignly: the ReplicaSet's replacement reached Ready, `readyReplicas` returned to 2, and `ready - 1 >= MIN_REMAINING_READY` passed. It was **not a total outage** — that backstop held at every decision. What failed was the layer meant to prevent churn during a shared fault.
+The `ready_replicas` backstop was then defeated benignly: the ReplicaSet's replacement reached Ready, `readyReplicas` returned to 2, and `ready - 1 >= MIN_REMAINING_READY` passed. It was **not a total outage** — but note the precise wording: that guard was *evaluated and permitted the action*. It never refused anything.
+
+**A guard that permits has not "refused".** That distinction was lost three separate times while writing this up — in the README summary, in the alert's own `description` annotation, and in a code comment beside the rule — each drifting into language that credited a control with *acting* when it had merely *passed*. It reads better, which is exactly why it happens, and it is the kind of claim someone relies on at 3am. This entry stated it correctly from the start, which is the only reason the drift in the summaries was visible at all. When writing up a safety control, check whether it fired or was simply never the binding constraint.
 
 **What to do.** Count pods from the alert *group* rather than firing-only; or gate on Deployment-level unavailable replicas; or add a cooldown between quarantines. Not applied — the measured behaviour is the artifact.
 
@@ -361,7 +364,7 @@ The `ready_replicas` backstop was then defeated benignly: the ReplicaSet's repla
 `RailheadAPIPodErrorRate` and both SLO burn-rate families excluded
 `handler!="/health"` and nothing else. `/metrics` is instrumented by the same middleware, and Prometheus scrapes it at roughly the rate the worker generates real traffic — so scrape traffic was measured at **~45% of the alert's denominator**.
 
-During a single-pod partition, with *every* `/items` request returning 5xx, the per-pod error ratio ceiling was about `0.05 / (0.05 + 0.048) = 0.51` against a `0.5` threshold. The observed ratio oscillated between **0.471 and 0.550**, and the first `PENDING` period was abandoned mid-count when it dipped, resetting the `for: 2m` timer. Detection took **13m52s** against a predicted 4-6 minutes, and needed two attempts.
+During a single-pod partition, with *every* `/items` request returning 5xx, the per-pod error ratio ceiling was about `0.05 / (0.05 + 0.048) = 0.51` against a `0.5` threshold. The observed ratio oscillated between **0.438 and 0.550** — re-queried from Prometheus afterwards rather than read off the alerts page, which is why the low end is 0.438 and not the 0.471 the page happened to be showing. The first `PENDING` period was abandoned mid-count when it dipped, resetting the `for: 2m` timer. Note the observed max of 0.550 exceeded the 0.51 ceiling calculated above: that calculation used one snapshot of the traffic mix, and the `/metrics` share actually moved between **32.8% and 60.9%** across the fault. Detection took **13m52s** against a predicted 4-6 minutes, and needed two attempts.
 
 The delay is not the problem. **A 2% margin means the alert can fail to fire at all** on a shorter fault, or if the scrape interval were tightened, or if real traffic dropped. The pod would be serving nothing but errors and nothing would say so.
 
@@ -396,3 +399,16 @@ The filter was `($_.status.containerStatuses | Where-Object { $_.ready }).Count 
 The script already wrapped its *outer* pipeline in `@()` for this exact reason. Only the inner one was missed, which is the failure mode worth remembering: the idiom is known, and it still gets dropped one level down.
 
 Two lessons. **`@()` around any pipeline whose `.Count` you intend to read**, without exception, because the bug only appears when the result happens to have one element — so it passes every test with two or more and fails on the realistic case. And the fixed version counts *not-ready* containers and requires zero, which is both immune to the same trap and semantically stricter: it requires every container in the pod to be ready rather than at least one.
+
+<a id="36"></a>
+### 36. A number read off a rendered UI is not a measurement
+
+Two figures published in the Week 7 write-ups were wrong, and both failed the same way.
+
+The per-pod error ratio was recorded as oscillating **0.471–0.550**. Re-querying the same expression over the same window afterwards returns a minimum of **0.438**: `0.500, 0.550, 0.526, 0.471, 0.471, 0.471, 0.500, 0.471, 0.438, ...`. 0.471 was the value the Prometheus alerts page happened to be displaying, and it recurs often enough to look like a floor. It is not one.
+
+`readyReplicas` was recorded as the sequence **1,1,1,1,2,2,1,2,2,2**, transcribed from a `kubectl get deploy -w` that was being watched rather than captured. Querying `kube_deployment_status_replicas_ready` shows something different in shape: a **single** contiguous dip — 2 until 20:28:08, 1 for seven consecutive 30s scrapes, 2 from 20:31:38 — not the two dips the sequence implies. The headline conclusion survived (it never reached 0), but the evidence offered for it did not exist.
+
+**Prometheus held both series the whole time.** Nothing prevented querying them; the numbers were simply taken from whatever was already on screen, at a moment chosen by when someone happened to look. A rendered page is a sample of a series at an arbitrary instant, and watching a stream is not the same as recording it.
+
+**The rule: if a number goes into a document, query the source.** Screenshots are evidence that something occurred; they are not the measurement. Retention makes this nearly free — Prometheus here keeps 5 days and CloudWatch 15 months, so a claim written up within that window can always be checked before it is published rather than after. Both corrections above came from queries run after the fact, which is the expensive way to find out.

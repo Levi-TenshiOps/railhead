@@ -1,12 +1,13 @@
 # Week 7 chaos scorecard
 
-Two scenarios plus one check, run **2026-09-04** against a live cluster, with §1
-re-run **2026-09-05** after a fix. Predictions were written down before each run
-and are not edited afterwards.
+Two scenarios plus one check, run **2026-09-04** against a live cluster, with
+scenario 1 re-run **2026-09-05** after a fix. Predictions were written down before each run
+and are not edited afterwards. **All timestamps are UTC**, matching what Prometheus
+and the container logs record.
 
 **None of these defects were findable by reading the code.** Two independent
-design reviews ran against the remediator beforehand; both predicted §2 would
-fail, and **both named the wrong mechanism**, blaming Alertmanager's grouping —
+design reviews ran against the remediator beforehand; both predicted scenario 2
+would fail, and **both named the wrong mechanism**, blaming Alertmanager's grouping —
 which worked correctly throughout. A defect whose cause two careful reviews get
 wrong is one only a live run will explain.
 
@@ -21,7 +22,7 @@ Outcomes: Self-healed · Auto-remediated · Correctly refused · Needed a human 
 
 **No code was changed, and the measured behaviour is the artifact** — the findings
 below are recorded as they happened, not patched away. One exception, made
-deliberately: the `/metrics` denominator defect in §1 was fixed and the scenario
+deliberately: the `/metrics` denominator defect in scenario 1 was fixed and that
 re-run to measure it, because it is a matcher change that can only narrow what the
 rule counts. The before and after are both kept. Everything else stays a
 recommendation. Commands: [`week7-chaos-runbook.md`](week7-chaos-runbook.md).
@@ -55,7 +56,7 @@ rule excluded only `handler!="/health"`, so scrape traffic was **~45% of the
 denominator**:
 `/items` 5xx 0.0185/s, `/items` 2xx 0.0407/s, **`/metrics` 2xx 0.0482/s**. With
 every `/items` request failing the ceiling is `0.05 / 0.098 ≈ 0.51` against a 0.5
-threshold — a **2% margin**. The ratio oscillated **0.471–0.550**, so the first
+threshold — a **2% margin**. The ratio oscillated **0.438–0.550**, so the first
 PENDING was abandoned mid-count.
 
 The delay is not the problem: **on a shorter fault, a tighter scrape interval, or
@@ -100,15 +101,15 @@ procedure, no `/metrics` polling.
 | PENDING abandoned | **yes, once** | **none** |
 | FIRING | **13m52s** | **5m46s** |
 | Quarantine | 12s after FIRING | 30s after FIRING |
-| Ratio behaviour | oscillated 0.471–0.550 | climbed monotonically to **1.0000** |
+| Ratio behaviour | oscillated 0.438–0.550 | climbed monotonically to **1.0000** |
 | Margin over the 0.5 threshold | **2%** | **100%** |
 
 ```
-07:56:56  inject
-08:00:42  ratio crosses 0.5  -> PENDING
-08:01:50  ratio 1.0000       (5m window now holds only fault samples)
-08:02:42  FIRING             (5m46s)
-08:03:12  quarantined; replacement Ready, Deployment back to 2/2
+13:56:56  inject
+14:00:42  ratio crosses 0.5  -> PENDING
+14:01:50  ratio 1.0000       (5m window now holds only fault samples)
+14:02:42  FIRING             (5m46s)
+14:03:12  quarantined; replacement Ready, Deployment back to 2/2
 ```
 
 **Detection went from 13m52s to 5m46s — 8m06s faster.** The speed is the smaller
@@ -131,7 +132,7 @@ are comparable, but this is not a controlled A/B and shouldn't be read as one.
 This is the one recommendation from Week 7 that was implemented rather than left
 on record, because it is a matcher change with no behavioural risk: it narrows
 what the rule counts and cannot make the alert fire on anything it didn't before.
-The guard defect in §2 stays unfixed on purpose.
+The guard defect in scenario 2 stays unfixed on purpose.
 
 **Evidence:** `railhead-alert-rules.png` — all five rules across all three groups
 carrying `handler!~"/health|/metrics"`, verified loaded in Prometheus with group
@@ -172,12 +173,16 @@ counts only `status == "firing"`, so webhook 2 contained both pods but scored
 `multi_pod=False`. Alertmanager grouping worked correctly; two paper reviews
 blamed it and both were wrong. Full mechanism: gotcha #32.
 
-**Severity, corrected: not a total outage.** `readyReplicas` never reached 0 —
-trace **1,1,1,1,2,2,1,2,2,2** — and `MIN_REMAINING_READY` held at every decision.
-Defence in depth held at the last layer. What failed was the layer meant to
-prevent churn: two pods quarantined and two replacements spawned during an
-outage where every replacement was equally broken.
-`MAX_QUARANTINES = 3 / 15min` would have stopped a third.
+**Severity, corrected: not a total outage.** Queried from
+`kube_deployment_status_replicas_ready`, `readyReplicas` was 2 until 20:28:08,
+**1** for seven consecutive 30s scrapes (20:28:08–20:31:08), and back to 2 from
+20:31:38 — a single dip of about three minutes, and **never 0**. Both webhooks
+arrived while it read 2, so `ready - 1 >= MIN_REMAINING_READY` **passed** each
+time: the guard permitted both quarantines rather than blocking either. The floor
+was there and was never reached. What failed was the layer meant to prevent
+churn: two pods quarantined and two replacements spawned during an outage where
+every replacement was equally broken. `MAX_QUARANTINES = 3 / 15min` would have
+stopped a third — reasoning, not a measurement; no third alert arrived.
 
 A code review found the risk; only running it found the cause.
 
@@ -213,7 +218,7 @@ Fix and the independence tradeoff: gotcha #34.
 **Captured (6):** `chaos-scenario1-remediator-slack` ·
 `chaos-scenario1-failure-mechanism` · `chaos-scenario1-quarantined-labels` ·
 `chaos-scenario2-grouped-alert` · `chaos-scenario2-cascade-state` ·
-`railhead-alert-rules` (**re-captured 2026-09-05** after the §1 fix — it shows the
+`railhead-alert-rules` (**re-captured 2026-09-05** after the scenario 1 fix — it shows the
 rules as they stand now, not as they were during the 13m52s run)
 
 **Three planned screenshots do not exist. Each absence is a result:**

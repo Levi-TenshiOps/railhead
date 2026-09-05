@@ -54,7 +54,7 @@ What persists between sessions is deliberately the cheap half: the S3/DynamoDB s
 
 The synthetic guard test passed because a hand-written payload contained both pods at once. Real Alertmanager never sends that payload. The code was correct and the test was wrong — which is the more transferable lesson.
 
-**What held.** `MIN_REMAINING_READY` refused at every decision point: `readyReplicas` never reached 0, so this was degradation, not an outage. Defence in depth held at the last layer. What failed was the layer meant to prevent churn.
+**No outage resulted.** `readyReplicas` dipped to 1 for about three minutes and never reached 0. A replacement was Ready before the second quarantine, so `MIN_REMAINING_READY` permitted both actions rather than having to block one — the floor was there and was never reached. What failed was the layer meant to prevent churn.
 
 **The fix — recommended, not implemented.** Count pods *recently acted on* rather than pods *currently firing*, using the 15-minute history the remediator already keeps for `MAX_QUARANTINES`. It stays unimplemented on purpose: the measured behaviour is the artifact of this project, and a defect that gets silently patched teaches nobody anything. Mechanism in full: [Known Gotchas](docs/known-gotchas.md) #32 and the [chaos scorecard](docs/week7-chaos-scorecard.md).
 
@@ -70,7 +70,7 @@ flowchart LR
 
 Both arrows out of Alertmanager come from a *single* receiver: every alert reaches the remediator exactly the way it reaches Slack. What's safe to act on is decided in `remediate.py` (`AUTO_REMEDIATE_ALERTS`), not in Alertmanager's routing tree — so changing it is one line in one place, rather than two configs that can drift apart.
 
-**Proven live.** A real pod's DNS was broken and its Postgres connections killed from the server side, producing genuine 500s while `/health` stayed green. The alert fired, the pod was quarantined, a replacement was scheduled, and an untouched control pod confirmed the fault stayed isolated. The fault-injection method is recorded in [`docs/remediator-t2-trigger-validation.md`](docs/remediator-t2-trigger-validation.md); the quarantine itself is in the screenshots below.
+**Proven live.** A real pod's DNS was broken and its Postgres connections killed from the server side, producing genuine 500s while `/health` stayed green. The alert fired, the pod was quarantined, a replacement was scheduled, and an untouched control pod confirmed the fault stayed isolated. The fault-injection method is recorded in [`docs/remediator-trigger-validation.md`](docs/remediator-trigger-validation.md); the quarantine itself is in the screenshots below.
 
 **What it doesn't do.** This stops the bleeding, not the disease: it restores capacity and preserves evidence, but doesn't fix Postgres or the network. Detection takes **~5 minutes** end to end (scrape interval, rate window, alert hold, Alertmanager grouping) — measured at **5m46s** against a network partition. It was **13m52s** until chaos testing found `/metrics` diluting the alert's denominator; that story is in [Chaos Engineering](#chaos-engineering) below, and it is a good illustration that this floor holds only while the denominator is honest. A service mesh could eject a bad endpoint faster, but would destroy the evidence doing it.
 
@@ -90,9 +90,9 @@ Two scenarios were chosen to test the remediator in both directions, because a r
 
 ### Scenario 1 — worked, and surfaced a defect that was then fixed
 
-The remediator handled a fault it was never tuned for. It identified the partitioned pod, quarantined it **12s** after the alert fired, and had a replacement serving traffic **~30s** later, leaving the broken pod running for inspection; the sibling never alerted. Failure latency measured **5.10s / 5.01s / 5.01s** — precisely `connect_timeout=5`, confirming the 5xx came from failed *new* connections.
+The remediator handled a fault it was never tuned for. It identified the partitioned pod, quarantined it **12s** after the alert fired on the first run (30s on the re-run below), and had a replacement serving traffic **~30s** later, leaving the broken pod running for inspection; the sibling never alerted. Failure latency measured **5.10s / 5.01s / 5.01s** — precisely `connect_timeout=5`, confirming the 5xx came from failed *new* connections.
 
-The find was in the alert beneath it. `/metrics` sat in the denominator at **~45%**, holding the error ratio oscillating **0.471–0.550** across a 0.5 threshold with a ceiling of **~0.51** — a **2% margin** — and one PENDING period was **abandoned** mid-count. Detection took **13m52s**; on a shorter fault it would not have fired at all.
+The find was in the alert beneath it. `/metrics` sat in the denominator at **~45%**, holding the error ratio oscillating **0.438–0.550** across a 0.5 threshold with a ceiling of **~0.51** — a **2% margin** — and one PENDING period was **abandoned** mid-count. Detection took **13m52s**; on a shorter fault it would not have fired at all.
 
 Excluding `/metrics` from all five rules and re-running the same scenario: **5m46s**, no abandoned PENDING, ratio pinned at **1.0**. `/metrics` is scraped on a fixed interval while `/items` throughput collapses under fault, so the scrape share rises exactly when the alert needs it lowest. Find, fix, re-measure — the loop the exercise exists to run.
 
@@ -100,7 +100,7 @@ Excluding `/metrics` from all five rules and re-running the same scenario: **5m4
 
 Both api pods were quarantined **300s apart** with **zero refusals**, during the shared outage the guard exists to prevent. Cause: a **self-erasing evidence loop** — quarantining the first pod drops it from the Service, so Prometheus stops scraping it and its alert resolves, leaving the second looking like a lone failure. Dissected under [Automated Remediation](#automated-remediation) above and in [gotcha #32](docs/known-gotchas.md).
 
-**It cost no outage.** `readyReplicas` traced **1,1,1,1,2,2,1,2,2,2** and never reached 0; `MIN_REMAINING_READY` refused every action that would have emptied the Service, and `MAX_QUARANTINES = 3 / 15min` would have stopped a third. The layer preventing churn failed; the layer preventing an outage held. That is defence in depth doing its job.
+**It cost no outage.** `readyReplicas` dipped to 1 for about three minutes and never reached 0 — a replacement was Ready before the second quarantine, so `MIN_REMAINING_READY` permitted both actions rather than having to block one. The floor was there and was never reached; what failed was the layer meant to prevent churn.
 
 ### Check 3 — a blind spot in the monitoring itself
 
