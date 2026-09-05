@@ -409,18 +409,30 @@ resource "kubernetes_manifest" "observability_application" {
             # apply to both SLOs below; only the window sizes and the
             # error-budget fraction (1 - SLO target) differ per SLO.
             #
-            # Every expression below excludes handler="/health". Probe traffic
-            # is not user traffic, and here it dominates: readiness probes it
-            # every 5s and liveness every 10s, so 2 replicas generate ~36
-            # requests/min against ~6/min of real worker traffic. Left in the
-            # denominator it is ~86% of the sample, and since /health touches
-            # no database it never fails and never runs slow -- it dilutes both
-            # SLOs in the direction that hides problems. Worked through: with
-            # /items failing 100%, the availability ratio computes to 6/42 =
-            # 14.3%, just under the 14.4% fast-burn threshold, so a total
-            # outage of the only endpoint that reaches Postgres would not have
-            # paged. The per-pod rule further down already excluded /health;
-            # these did not, which is what made the gap easy to miss.
+            # Every expression below excludes handler=~"/health|/metrics".
+            # Neither is user traffic, and both dilute the denominator in the
+            # direction that hides problems. Note the operator: !~ not !=,
+            # because the exclusion is now an alternation. Prometheus anchors
+            # !~ fully, so "/health|/metrics" matches those two values exactly
+            # and nothing else.
+            #
+            # /health: readiness probes it every 5s and liveness every 10s, so
+            # 2 replicas generate ~36 requests/min against ~6/min of real
+            # worker traffic -- ~86% of the sample. It touches no database, so
+            # it never fails and never runs slow. Worked through: with /items
+            # failing 100%, the availability ratio computes to 6/42 = 14.3%,
+            # just under the 14.4% fast-burn threshold, so a total outage of
+            # the only endpoint that reaches Postgres would not have paged.
+            #
+            # /metrics: added after Week 7 chaos testing measured it at ~45%
+            # of the post-/health denominator DURING a fault. Prometheus
+            # scrapes it on a fixed interval, but /items throughput collapses
+            # under fault -- each failed request blocks 5s on connect_timeout
+            # -- so the scrape share rises exactly when the alert needs it
+            # lowest. That held the per-pod error ratio oscillating 0.471-0.550
+            # against a 0.5 threshold: a 2% margin, one abandoned PENDING, and
+            # 13m52s to fire. On a shorter fault it would not have fired at
+            # all. Measured, not theorised: docs/week7-chaos-scorecard.md.
             additionalPrometheusRulesMap = {
               "railhead-api-slo-burn-rate" = {
                 groups = [
@@ -439,15 +451,15 @@ resource "kubernetes_manifest" "observability_application" {
                         alert = "RailheadAPIAvailabilityBurnRateCritical"
                         expr  = <<-EOT
                           (
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health", status=~"5xx"}[1h]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics", status=~"5xx"}[1h]))
                             /
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health"}[1h]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics"}[1h]))
                           ) > (14.4 * 0.01)
                           and
                           (
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health", status=~"5xx"}[5m]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics", status=~"5xx"}[5m]))
                             /
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health"}[5m]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics"}[5m]))
                           ) > (14.4 * 0.01)
                         EOT
                         "for" = "2m"
@@ -464,15 +476,15 @@ resource "kubernetes_manifest" "observability_application" {
                         alert = "RailheadAPIAvailabilityBurnRateWarning"
                         expr  = <<-EOT
                           (
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health", status=~"5xx"}[6h]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics", status=~"5xx"}[6h]))
                             /
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health"}[6h]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics"}[6h]))
                           ) > (6 * 0.01)
                           and
                           (
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health", status=~"5xx"}[30m]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics", status=~"5xx"}[30m]))
                             /
-                            sum(rate(http_requests_total{job="railhead-api", handler!="/health"}[30m]))
+                            sum(rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics"}[30m]))
                           ) > (6 * 0.01)
                         EOT
                         "for" = "5m"
@@ -503,17 +515,17 @@ resource "kubernetes_manifest" "observability_application" {
                         expr  = <<-EOT
                           (
                             1 - (
-                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!="/health", le="0.3"}[1h]))
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!~"/health|/metrics", le="0.3"}[1h]))
                               /
-                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!="/health"}[1h]))
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!~"/health|/metrics"}[1h]))
                             )
                           ) > (14.4 * 0.05)
                           and
                           (
                             1 - (
-                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!="/health", le="0.3"}[5m]))
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!~"/health|/metrics", le="0.3"}[5m]))
                               /
-                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!="/health"}[5m]))
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!~"/health|/metrics"}[5m]))
                             )
                           ) > (14.4 * 0.05)
                         EOT
@@ -532,17 +544,17 @@ resource "kubernetes_manifest" "observability_application" {
                         expr  = <<-EOT
                           (
                             1 - (
-                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!="/health", le="0.3"}[6h]))
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!~"/health|/metrics", le="0.3"}[6h]))
                               /
-                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!="/health"}[6h]))
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!~"/health|/metrics"}[6h]))
                             )
                           ) > (6 * 0.05)
                           and
                           (
                             1 - (
-                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!="/health", le="0.3"}[30m]))
+                              sum(rate(http_request_duration_seconds_bucket{job="railhead-api", handler!~"/health|/metrics", le="0.3"}[30m]))
                               /
-                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!="/health"}[30m]))
+                              sum(rate(http_request_duration_seconds_count{job="railhead-api", handler!~"/health|/metrics"}[30m]))
                             )
                           ) > (6 * 0.05)
                         EOT
@@ -567,10 +579,19 @@ resource "kubernetes_manifest" "observability_application" {
                     # cannot actually verify the "siblings are healthy" half:
                     # it is per-pod only, so a shared outage fires it once per
                     # pod. Distinguishing the two is deliberately the
-                    # remediator's job (its multi_pod guard), not the alert's
-                    # -- Alertmanager delivers the whole group in one payload,
-                    # so the remediator can see all firing pods at once, which
-                    # a single PromQL expression evaluated per-series cannot.
+                    # remediator's job (its multi_pod guard), not the alert's.
+                    #
+                    # That delegation was based on an assumption Week 7 chaos
+                    # testing DISPROVED: that Alertmanager delivers the whole
+                    # group in one payload, letting the remediator see every
+                    # firing pod at once. In practice the pods' `for: 2m`
+                    # timers desynchronise and they arrive in SEPARATE
+                    # payloads, so the guard does not engage. Measured: both
+                    # pods quarantined 300s apart, zero refusals. The alert
+                    # itself is fine -- the assumption about who catches the
+                    # shared-outage case is what was wrong. See
+                    # docs/known-gotchas.md #32.
+                    #
                     # An aggregate
                     # sum-over-all-pods burn-rate alert would never catch
                     # this: one bad pod among several healthy ones barely
@@ -585,11 +606,11 @@ resource "kubernetes_manifest" "observability_application" {
                         expr  = <<-EOT
                           (
                             sum by (namespace, pod) (
-                              rate(http_requests_total{job="railhead-api", handler!="/health", status=~"5xx"}[5m])
+                              rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics", status=~"5xx"}[5m])
                             )
                             /
                             sum by (namespace, pod) (
-                              rate(http_requests_total{job="railhead-api", handler!="/health"}[5m])
+                              rate(http_requests_total{job="railhead-api", handler!~"/health|/metrics"}[5m])
                             )
                           ) > 0.5
                         EOT
@@ -599,7 +620,7 @@ resource "kubernetes_manifest" "observability_application" {
                         }
                         annotations = {
                           summary     = "Pod {{ $labels.pod }} is serving majority 5xx"
-                          description = "Pod {{ $labels.pod }} in {{ $labels.namespace }} has had a >50% 5xx rate on non-health-check requests for at least 2 minutes. This expression is per-pod only -- it does NOT compare against the other replicas, so check whether this alert also fired for them. One pod alone is the corrupted-connection-pool failure mode and quarantining it is the correct response; several at once is a shared dependency outage, and railhead-remediator will refuse to act on its multi-pod guard. See the root README's Automated Remediation section."
+                          description = "Pod {{ $labels.pod }} in {{ $labels.namespace }} has had a >50% 5xx rate on non-health-check requests for at least 2 minutes. This expression is per-pod only -- it does NOT compare against the other replicas, so check whether this alert also fired for them. One pod alone is the corrupted-connection-pool failure mode and quarantining it is the correct response. Several at once is a shared dependency outage, where every replacement is equally broken. The remediator's multi_pod guard is meant to refuse in that case, but chaos testing showed it does NOT reliably engage -- the pods usually arrive in separate Alertmanager payloads, so each looks like a lone failure. If this alert is firing for more than one pod, expect the remediator to quarantine them anyway and be ready to intervene; MIN_REMAINING_READY still prevents it emptying the Service. See the root README's Automated Remediation section."
                         }
                       }
                     ]
