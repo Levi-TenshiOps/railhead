@@ -45,6 +45,7 @@ end and keep their number permanently, even once a later entry supersedes them.
 34. [`service_number_of_running_pods` counts pod phase, not readiness](#34)
 35. [A PowerShell pipeline returning one object has no `.Count`](#35)
 36. [A number read off a rendered UI is not a measurement](#36)
+37. [A Helm chart can ship an empty `ClusterRole` and run perfectly](#37)
 
 ---
 
@@ -211,7 +212,7 @@ It is also **time-dependent**, which is why three verified cycles never caught i
 
 Fixed: `rebuild-sequence.md` now runs `helm repo update` before step 2, not only inside step 4.
 
-**This is the third instance of one pattern**, and it is worth naming as a pattern rather than three separate bugs. The Alloy empty-`ClusterRole` default, the stale kubeconfig pointing at a destroyed endpoint (#21), and this all share a signature: **the system reports healthy and silently does nothing.** In each case the status command answers from a different source than the one doing the work — `helm repo list` reads the list, not the indexes; kubeconfig holds a context name, not a reachable endpoint; a ClusterRole exists but grants nothing. The generalisable check is to verify against *what the component actually consumes*, never against the thing that merely describes it.
+**This is the third instance of one pattern**, and it is worth naming as a pattern rather than three separate bugs. The Alloy empty-`ClusterRole` default (#37), the stale kubeconfig pointing at a destroyed endpoint (#21), and this all share a signature: **the system reports healthy and silently does nothing.** In each case the status command answers from a different source than the one doing the work — `helm repo list` reads the list, not the indexes; kubeconfig holds a context name, not a reachable endpoint; a ClusterRole exists but grants nothing. The generalisable check is to verify against *what the component actually consumes*, never against the thing that merely describes it.
 
 <a id="25"></a>
 ### 25. CloudWatch log groups outlive `terraform destroy`
@@ -353,6 +354,8 @@ The `ready_replicas` backstop was then defeated benignly: the ReplicaSet's repla
 
 **A guard that permits has not "refused".** That distinction was lost three separate times while writing this up — in the README summary, in the alert's own `description` annotation, and in a code comment beside the rule — each drifting into language that credited a control with *acting* when it had merely *passed*. It reads better, which is exactly why it happens, and it is the kind of claim someone relies on at 3am. This entry stated it correctly from the start, which is the only reason the drift in the summaries was visible at all. When writing up a safety control, check whether it fired or was simply never the binding constraint.
 
+**A wrong claim about a safety control travels faster than its correction.** This one reached six places — the README summary, the Architecture bullet, the alert's own `description` annotation, a code comment beside the rule, the chaos scorecard, and the on-call runbook — and took four separate review passes to clear. The runbook was found **last**, which is the wrong order: it is the only one of the six that someone reads at 3am while deciding what to do. When a claim about a control turns out to be wrong, enumerate every place it was asserted before fixing any of them, and start with the operational documents.
+
 **What to do.** Count pods from the alert *group* rather than firing-only; or gate on Deployment-level unavailable replicas; or add a cooldown between quarantines. Not applied — the measured behaviour is the artifact.
 
 **Method note.** The cause is an interaction between the remediator, the Service selector, the ServiceMonitor and Prometheus staleness — visible in no single file. A code review found the risk; only running it found the cause.
@@ -412,3 +415,14 @@ The per-pod error ratio was recorded as oscillating **0.471–0.550**. Re-queryi
 **Prometheus held both series the whole time.** Nothing prevented querying them; the numbers were simply taken from whatever was already on screen, at a moment chosen by when someone happened to look. A rendered page is a sample of a series at an arbitrary instant, and watching a stream is not the same as recording it.
 
 **The rule: if a number goes into a document, query the source.** Screenshots are evidence that something occurred; they are not the measurement. Retention makes this nearly free — Prometheus here keeps 5 days and CloudWatch 15 months, so a claim written up within that window can always be checked before it is published rather than after. Both corrections above came from queries run after the fact, which is the expensive way to find out.
+
+<a id="37"></a>
+### 37. A Helm chart can ship an empty `ClusterRole` and run perfectly
+
+The Grafana Alloy chart's default `ClusterRole` grants nothing. Alloy's pods start, report `Running`, and collect no logs at all — no error, no crash, no warning. `discovery.kubernetes` finds no pods to tail and `loki.source.kubernetes` has no `pods/log` access to read them with, so the pipeline is wired end to end and moves nothing.
+
+The rules this project adds, and what each is for, are in the comment at `terraform/modules/argocd/main.tf:957`.
+
+Recorded here because #24 names this as one of three instances of a pattern and the other two are entries: **the status command answers from a different source than the one doing the work.** A `ClusterRole` existing is not the same as it granting anything, exactly as `helm repo list` reporting a repo is not the same as its index existing (#24), and a kubeconfig holding a context name is not the same as that endpoint answering (#21). Verify against what the component actually consumes.
+
+One honest limit on this entry: the Terraform comment states the consequence of the chart default, not a dated incident. Whether it was hit in anger or caught while reading the chart is not recorded either way.

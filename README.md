@@ -1,6 +1,6 @@
 # Railhead — Production-Grade SRE Platform on AWS
 
-Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and now monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account, not just configured and left untested.
+Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account, not just configured and left untested.
 
 Automated remediation is built: when a pod is serving majority errors while its siblings stay healthy, a script quarantines it — relabeling it out of the Service and ReplicaSet selectors so traffic stops and a healthy replacement is created, while the broken pod keeps running for inspection.
 
@@ -26,7 +26,7 @@ Two paths lead into the cluster and they never cross: container images travel th
 - **ECR** ([`terraform/modules/ecr`](terraform/modules/ecr)): immutable image tags, vulnerability scanning on push, and a lifecycle policy so image storage doesn't grow forever.
 - **CI pipeline** (`.github/workflows/ci.yml`): every push to `main` and every pull request against it builds all three service images (`api`, `worker`, `remediator`) and scans them with Trivy. Any HIGH or CRITICAL vulnerability with a fix available fails the build. Unfixed CVEs are excluded on purpose (`ignore-unfixed: true`) — gating on vulnerabilities that have no upstream patch yet just trains people to bypass the gate instead of fixing anything. AWS credentials are only issued on pushes to `main`, never on a PR run, so a malicious PR can't steal real credentials even if it tried. Bumping the deployed image tag is a manual commit rather than an automated CI step — a deliberate choice to avoid the added complexity of giving CI write access to the repo, and to keep a human in the loop before any new image actually goes live.
 - **EKS** ([`terraform/modules/eks`](terraform/modules/eks)): a managed control plane, a 2x t3.large node group (sized for the pod-per-node ceiling — see [Known Gotchas](docs/known-gotchas.md)), and core add-ons (VPC CNI, CoreDNS, kube-proxy, EBS CSI) all through Terraform. EBS CSI runs on IAM Roles for Service Accounts (IRSA) alone; VPC CNI needs a node-level policy to bootstrap before its own IRSA role takes over.
-- **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a small FastAPI service backed by Postgres, plus a worker that exercises the API on a loop. On first install, the API briefly crash-loops while Postgres is still starting — nothing waits for DB readiness yet — then self-recovers within about a minute. Known, not hidden; an `initContainer` is the obvious fix, just not built.
+- **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a small FastAPI service backed by Postgres, plus a worker that exercises the API on a loop. On first install, the API briefly crash-loops while Postgres is still starting — nothing waits for DB readiness yet — then self-recovers within about a minute — though one rebuild produced no restarts at all, so the race may be less deterministic than documented. Known, not hidden; an `initContainer` is the obvious fix, just not built.
 - **GitOps** ([`terraform/modules/argocd`](terraform/modules/argocd)): ArgoCD deploys the app from a git-tracked `Application`, with `selfHeal` and `prune` on — no one runs `helm install` by hand anymore. Proven, not just configured: scaling the API to 0 by hand was reverted back to 2 replicas in about a second, with zero human involvement.
 - **Metrics** (`terraform/modules/argocd`, kube-prometheus-stack): Prometheus and Grafana, deployed as their own ArgoCD Application. The API exposes `/metrics` via `prometheus-fastapi-instrumentator`. Dashboards are code — JSON committed to the repo, auto-loaded by Grafana's sidecar — so wiping the Grafana PVC doesn't lose them.
 - **Logs** (`terraform/modules/argocd`, Loki + Grafana Alloy): Loki aggregates logs cluster-wide (S3-backed, 7-day retention), shipped by Alloy as a DaemonSet. Alloy over the older Promtail specifically because Promtail hit end-of-life in March 2026. Grafana picks up Loki the same way it picks up dashboards — a labeled ConfigMap.
@@ -42,13 +42,13 @@ What persists between sessions is deliberately the cheap half: the S3/DynamoDB s
 
 ## Automated Remediation
 
-**The failure.** `railhead-api` runs 2 replicas behind one Service. One pod's Postgres connection pool got corrupted under load: `psycopg2`'s `SimpleConnectionPool` isn't thread-safe, and FastAPI calls it from a threadpool. Every `getconn()` started raising, so that pod returned 500 on every `/items` request — half the Service's traffic — while still reporting `1/1 Running` and `Ready`. Kubernetes never noticed, because the readiness probe hits `/health`, which deliberately doesn't touch the database — checking a shared dependency in a readiness probe fails every replica at once, turning partial degradation into a total outage.
+**The failure this exists for.** `railhead-api` runs 2 replicas behind one Service. `psycopg2`'s `SimpleConnectionPool` is not thread-safe and FastAPI calls it from a threadpool, so a pod whose pool gets corrupted returns 500 on every `/items` request — half the Service's traffic — while still reporting `1/1 Running` and `Ready`. Kubernetes would never notice, because the readiness probe hits `/health`, which deliberately doesn't touch the database — checking a shared dependency in a readiness probe fails every replica at once, turning partial degradation into a total outage.
 
 **Why a better probe wouldn't help.** Say the probe did check Postgres. The pod would fail readiness and stop receiving traffic, but it would still match the ReplicaSet's selector and still count toward the replica total. No replacement would ever be created, and the service would sit at half capacity indefinitely. Dropping the pod out of the *selector* is the only thing that actually restores capacity.
 
 **What the remediator does.** On a per-pod error-rate alert it patches the pod's `app` label to `railhead-api-quarantined`. That one change hits two selectors at once: the Service stops routing to it, and the ReplicaSet sees itself short a pod and creates a healthy one. The broken pod keeps running, orphaned, so it can still be inspected — then it's deleted after a 60-minute TTL.
 
-**Three guards — and one of them does not work.** It refuses to act if quarantining would leave nothing serving traffic, and after 3 quarantines in 15 minutes (a bad deployment, not one bad pod). Every refusal is posted to Slack. A third guard is meant to refuse when several pods are alerting at once — a shared failure, where any replacement would be equally broken. **Chaos testing proved it does not hold.** Both api pods were quarantined 300s apart with zero refusals, during exactly the outage the guard exists to prevent.
+**Three guards — and one of them does not work.** It refuses to act if quarantining would leave nothing serving traffic, and after 3 quarantines in 15 minutes (a bad deployment, not one bad pod). Refusals are posted to Slack. A third guard is meant to refuse when several pods are alerting at once — a shared failure, where any replacement would be equally broken. **Chaos testing proved it does not hold.** Both api pods were quarantined 300s apart with zero refusals, during exactly the outage the guard exists to prevent.
 
 **Why it failed.** The guard reads a single webhook payload and counts pods whose alert is still `firing` in it. Two things break that. Alertmanager's `group_interval` is 5 minutes and the two pods' `for: 2m` timers desynchronised by 65s, so they arrived in *separate* payloads. And quarantining the first pod drops it out of the Service — the ServiceMonitor scrapes *through* the Service, so Prometheus stops scraping it and its alert **resolves**. By the time the second payload arrived, the first pod was no longer firing and the second genuinely was the only one. **The remediator's own action erases the evidence its next decision depends on.**
 
@@ -70,7 +70,7 @@ flowchart LR
 
 Both arrows out of Alertmanager come from a *single* receiver: every alert reaches the remediator exactly the way it reaches Slack. What's safe to act on is decided in `remediate.py` (`AUTO_REMEDIATE_ALERTS`), not in Alertmanager's routing tree — so changing it is one line in one place, rather than two configs that can drift apart.
 
-**Proven live.** A real pod's DNS was broken and its Postgres connections killed from the server side, producing genuine 500s while `/health` stayed green. The alert fired, the pod was quarantined, a replacement was scheduled, and an untouched control pod confirmed the fault stayed isolated. The fault-injection method is recorded in [`docs/remediator-trigger-validation.md`](docs/remediator-trigger-validation.md); the quarantine itself is in the screenshots below.
+**Proven live.** A real pod's DNS was broken and its Postgres connections killed from the server side, producing genuine 500s while `/health` stayed green. The alert fired, the pod was quarantined, a replacement was scheduled, and an untouched control pod confirmed the fault stayed isolated. The injection method is recorded in [`docs/remediator-trigger-validation.md`](docs/remediator-trigger-validation.md), which validates the trigger condition; the quarantine itself is in the screenshots below.
 
 **What it doesn't do.** This stops the bleeding, not the disease: it restores capacity and preserves evidence, but doesn't fix Postgres or the network. Detection takes **~5 minutes** end to end (scrape interval, rate window, alert hold, Alertmanager grouping) — measured at **5m46s** against a network partition. It was **13m52s** until chaos testing found `/metrics` diluting the alert's denominator; that story is in [Chaos Engineering](#chaos-engineering) below, and it is a good illustration that this floor holds only while the denominator is honest. A service mesh could eject a bad endpoint faster, but would destroy the evidence doing it.
 
@@ -86,7 +86,7 @@ Two scenarios were chosen to test the remediator in both directions, because a r
 | 2 | Postgres removed under both api pods | Database backend outage | Guard refuses | **Guard did not engage. Both pods quarantined — no outage** |
 | 3 | Remediator held down 10 min | Monitoring agent outage | Needed a human | **Undetected** |
 
-**None of it was findable by reading the code.** Two independent design reviews predicted scenario 2 would fail, and **both named the wrong mechanism** — each blamed Alertmanager's grouping, which worked correctly throughout.
+**Reading the code found the risk; only running it found the cause.** Two independent design reviews predicted scenario 2 would fail, and **both named the wrong mechanism** — each blamed Alertmanager's grouping, which worked correctly throughout.
 
 ### Scenario 1 — worked, and surfaced a defect that was then fixed
 
@@ -147,7 +147,7 @@ I wanted actual proof here, not just claims — so this folder has real `terrafo
 The `railhead` Application's full resource tree in ArgoCD — Secret, Services, ServiceAccount, Deployment, ReplicaSet, pods, StatefulSet, PVC, NetworkPolicy, PodDisruptionBudget and StorageClass, every one green. This is what "deployed by GitOps" actually looks like:
 ![ArgoCD resource tree for the railhead Application, all resources healthy and synced](screenshots/argocd-synced.png)
 
-The same platform **mid-incident**, which is the half most portfolios never show. The observability Application is stuck `Progressing` — deadlocked, not catching up. Any value change triggers a Grafana rollout via a config-checksum annotation, but the new pod can't schedule: Grafana's volume is AZ-pinned by node affinity and that AZ's node was already at its pod ceiling. The old pod (`3/3`, 9 hours) kept serving the whole time while the new one sat `Pending` (`0/3`, 3 minutes), eight ReplicaSet revisions deep. The fix is counterintuitive — delete the *old* pod to free the node slot and the volume attachment, never the `Pending` one, which the ReplicaSet immediately recreates ([Known Gotchas](docs/known-gotchas.md) #2):
+The same platform **mid-incident**, which is the half most portfolios never show. The observability Application sits `Progressing` with its new Grafana pod `Pending` (`0/3`, 3 minutes) while the previous one keeps serving (`3/3`, 9 hours), eight ReplicaSet revisions deep. That is the signature of the rollout deadlock in [Known Gotchas](docs/known-gotchas.md) #2 — a config-checksum annotation triggers a rollout on any value change, and at the pod-per-node ceiling the surge pod has nowhere to schedule because Grafana's volume is AZ-pinned. The fix there is counterintuitive: delete the *old* pod, never the `Pending` one, which the ReplicaSet immediately recreates:
 ![ArgoCD resource tree with the observability app stuck Progressing, a Pending Grafana pod behind eight ReplicaSet revisions](screenshots/argocd-debug-resource-tree.png)
 
 Detection and repair in one picture: the error rate spikes as the fault takes hold, holds while the pod keeps serving broken traffic, then drops back to zero the moment quarantine restores capacity:
@@ -226,7 +226,7 @@ Worker logs, alternating `GET`/`POST` calls against the API on a fixed interval:
 Full resource tree for the `railhead` Application (API, worker, Postgres StatefulSet, and their supporting resources) — *also shown above*:
 ![ArgoCD resource tree for the railhead Application](screenshots/argocd-synced.png)
 
-Resource tree during the Grafana rollout deadlock of [Known Gotchas](docs/known-gotchas.md) #2 — the Application stuck `Progressing`, the surge pod `Pending` behind eight ReplicaSet revisions because Grafana's AZ-pinned volume had nowhere to schedule. The debugging process itself, not just the clean end state. *Also shown above*:
+Resource tree with the observability Application `Progressing` and its surge pod `Pending` behind eight ReplicaSet revisions — the signature of the rollout deadlock in [Known Gotchas](docs/known-gotchas.md) #2. The debugging process itself, not just the clean end state. *Also shown above*:
 ![ArgoCD resource tree with the observability app stuck Progressing, a Pending Grafana pod behind eight ReplicaSet revisions](screenshots/argocd-debug-resource-tree.png)
 
 Self-heal proof: manually scaling the API to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to 2 replicas by ArgoCD, with zero human intervention:
@@ -322,7 +322,7 @@ The alert rules as they stand **after** the `/metrics` fix — all five carrying
 <details>
 <summary><b>AWS-native monitoring — CloudWatch (6 screenshots)</b></summary>
 
-Container Insights overview. The Cluster and Service rows now read `2 OK` and `1 OK`; the other resource types have no alarms targeting them, so they still show "No alarms detected":
+Container Insights overview. The Cluster and Service rows read `2 OK` and `1 OK`; the other resource types have no alarms targeting them, so they still show "No alarms detected":
 ![CloudWatch Container Insights overview for the railhead-dev cluster](screenshots/cloudwatch-container-insights.png)
 
 All three alarms in `OK`, none carrying a notification action:
@@ -331,7 +331,7 @@ All three alarms in `OK`, none carrying a notification action:
 Both log groups at 1-day retention — the fix for never-expiring groups outliving `terraform destroy`. Terraform owns them, which is what makes the retention stick and what removes them at teardown:
 ![CloudWatch log groups showing both railhead groups at 1 day retention](screenshots/cloudwatch-log-groups-retention.png)
 
-`apiserver_storage_size_bytes` graphed — etcd object storage, flat at 28.27 MB across the window, and the metric the growth alarm watches:
+`apiserver_storage_size_bytes` graphed — etcd object storage, flat at 28.27 MB as the console renders it, which is 27.0 MiB: the baseline the alarm's 100 MB threshold is set against:
 ![CloudWatch metrics graph of apiserver_storage_size_bytes](screenshots/cloudwatch-apiserver-storage.png)
 
 Least-privilege, checked from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and the audit log shows exactly one was ever exercised: `list pods`, twice, in `railhead`. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
