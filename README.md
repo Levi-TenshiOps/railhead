@@ -1,6 +1,6 @@
 # Railhead — Production-Grade SRE Platform on AWS
 
-Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account, not just configured and left untested.
+Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account.
 
 Automated remediation is built: when a pod is serving majority errors while its siblings stay healthy, a script quarantines it — relabeling it out of the Service and ReplicaSet selectors so traffic stops and a healthy replacement is created, while the broken pod keeps running for inspection.
 
@@ -78,7 +78,7 @@ Both arrows out of Alertmanager come from a *single* receiver: every alert reach
 
 Before this, the remediator had only ever been validated against a fault built by hand to trigger it. That proves the code path runs. It proves nothing about how the system behaves when a failure arrives on its own terms. **Chaos engineering exists to find where a system does not do what its design says — before a real incident finds it instead.**
 
-Two scenarios were chosen to test the remediator in both directions, because a remediation system has two correct behaviours and only one is usually tested: it must **act** on one bad pod, and **refuse** when the shared dependency is down, since there every replacement inherits the same fault. A third check pointed the same question at the monitoring itself. Predictions were written down before each run and are not edited afterwards.
+Two scenarios were chosen to test the remediator in both directions, because a remediation system has two correct behaviours and only one is usually tested: it must **act** on one bad pod, and **refuse** when the shared dependency is down, since there every replacement inherits the same fault. A third check pointed the same question at the monitoring itself.
 
 | | Fault | Analogue | Predicted | Measured |
 |---|---|---|---|---|
