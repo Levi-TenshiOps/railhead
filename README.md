@@ -4,7 +4,7 @@ Railhead is a portfolio project built to prove something specific: that I can ru
 
 Automated remediation is built: when a pod is serving majority errors while its siblings stay healthy, a script quarantines it — relabeling it out of the Service and ReplicaSet selectors so traffic stops and a healthy replacement is created, while the broken pod keeps running for inspection.
 
-Chaos engineering, with predictions written down first, then turned up a real defect in that remediator — see [Chaos Engineering](#chaos-engineering) below.
+Injecting real faults into the running cluster then turned up a defect in that remediator — see [Chaos Engineering](#chaos-engineering) below.
 
 ## Why "Railhead"
 
