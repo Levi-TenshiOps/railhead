@@ -46,6 +46,7 @@ end and keep their number permanently, even once a later entry supersedes them.
 35. [A PowerShell pipeline returning one object has no `.Count`](#35)
 36. [A number read off a rendered UI is not a measurement](#36)
 37. [A Helm chart can ship an empty `ClusterRole` and run perfectly](#37)
+38. [`$ErrorActionPreference` does not stop a failing native command](#38)
 
 ---
 
@@ -175,6 +176,8 @@ The reliable fix in PowerShell is to stop passing quote-bearing format strings t
 | `kubectl exec -- python -c '...requests.post("http://...")...'` | `SyntaxError: invalid syntax` — Python received the URL unquoted |
 
 Three general escapes, in order of preference. **Pass the payload as a file** — `--query-string "file://$env:TEMP\q.txt"`, or `kubectl patch --patch-file`, which `rebuild-sequence.md` step 5 already does for this reason. **Pipe it via stdin** — `$script | kubectl exec -i ... -- python -` sidesteps argument parsing completely and was what finally worked for the Python case. **Quote the whole argument at the PowerShell level** — `"-target=module.eks"` — which works for simple values with no inner quotes.
+
+**A different native-command trap, and they are easy to conflate: #38.** This entry is about arguments being mangled on the way *in*. #38 is about failure not coming back *out* — a native command that exits non-zero does not stop the script.
 
 Note that assigning to a variable first does *not* help. `$py = 'requests.post("http://x")'` still loses its inner quotes when passed to a native command, because the re-quoting happens at invocation, not at assignment.
 
@@ -430,3 +433,19 @@ The rules this project adds, and what each is for, are in the comment at `terraf
 Recorded here because #24 names this as one of three instances of a pattern and the other two are entries: **the status command answers from a different source than the one doing the work.** A `ClusterRole` existing is not the same as it granting anything, exactly as `helm repo list` reporting a repo is not the same as its index existing (#24), and a kubeconfig holding a context name is not the same as that endpoint answering (#21). Verify against what the component actually consumes.
 
 One honest limit on this entry: the Terraform comment states the consequence of the chart default, not a dated incident. Whether it was hit in anger or caught while reading the chart is not recorded either way.
+
+<a id="38"></a>
+### 38. `$ErrorActionPreference` does not stop a failing native command
+
+`$ErrorActionPreference = "Stop"` governs **cmdlet** errors. It has no effect on native executables — `kubectl`, `terraform`, `aws`, `helm`, `git`. One of those exiting non-zero writes to stderr and the script carries straight on to the next line. PowerShell 7.3 added `$PSNativeCommandUseErrorActionPreference` to fix this; **5.1 has no equivalent**, so every native call whose failure matters needs `if ($LASTEXITCODE -ne 0)` after it.
+
+What makes it worth an entry is where it was found. `chaos/run-scenario-1.ps1` applied *every* other PowerShell gotcha this file documents — `@()` around the pipelines it counts (#35), JSON parsing instead of a quoted jsonpath (#20), `-Encoding ascii` instead of `utf8` (#5, #16) — each with a comment naming the entry. It then ran `kubectl apply` and printed the next step regardless of whether the apply succeeded. A webhook rejection, which the runbook explicitly warns to stop on (#29), would have read as a successful injection.
+
+The two failure shapes it produced:
+
+- **`kubectl apply` fails** → the script prints "Watch the target pod's metrics" and the operator waits for a fault that was never injected. Indistinguishable from a fault that had no effect, which is the *exact* ambiguity the script's own docstring says it exists to remove.
+- **`kubectl get` fails** → `ConvertFrom-Json` receives nothing, the ready-pod filter yields zero, and the script throws **"Need 2 ready railhead-api pods, found 0"** — sending the operator to look at pod health when the real fault was the API call.
+
+That second one is the more dangerous shape: not silence, but a **confident, specific, wrong** diagnosis.
+
+This is the "reports healthy and silently does nothing" pattern (#24) reappearing inside a script, and it defeats the same reflex #30 names — reading the status line instead of testing the behaviour. Knowing every documented trap in a language is not the same as knowing how that language reports failure.

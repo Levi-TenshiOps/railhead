@@ -10,7 +10,7 @@ CRDs exist, and the same apply is what installs them (`known-gotchas.md` #12).
 Every pass is resumable — re-run the identical command and it continues.
 
 Confirm DNS resolves before starting; step 1 is a 12-minute apply.
-```
+```powershell
 Resolve-DnsName eks.us-east-1.amazonaws.com -ErrorAction Stop | Out-Null; "DNS OK"
 ```
 If that fails — or a pass dies mid-run with `no such host` — run `ping 8.8.8.8`.
@@ -22,7 +22,7 @@ is known to be valid is this a real DNS problem — see `known-gotchas.md` #17
 before touching a network setting.
 
 ## 1. Foundation and cluster — ~12 min
-```
+```powershell
 terraform -chdir=terraform/environments/dev apply "-target=module.vpc" "-target=module.iam" "-target=module.ecr" "-target=module.eks"
 ```
 **Expect `0 to change, 0 to destroy` and roughly 40 added.** The exact count
@@ -38,7 +38,7 @@ rejects the command with `Invalid target "module"`. The EKS control plane
 accounts for 8–10 minutes of that, the node group another 3.
 
 ## 1b. Point kubectl at the new cluster — required before any kubectl command
-```
+```powershell
 aws eks update-kubeconfig --name railhead-dev --region us-east-1
 kubectl get nodes
 ```
@@ -61,7 +61,7 @@ reporting all four repos regardless, so this fails as
 `Unable to locate chart argo-cd: no cached repo found` while everything looks
 configured. It is time-dependent — fine on a rebuild soon after the last one,
 broken once cleanup has run (`known-gotchas.md` #24).
-```
+```powershell
 helm repo add chaos-mesh https://charts.chaos-mesh.org --force-update
 helm repo update
 terraform -chdir=terraform/environments/dev apply "-target=module.argocd.helm_release.argocd"
@@ -79,7 +79,7 @@ of `helm_release.argocd`, so `-target` skips it until step 3.
 recognize GroupVersionKind from manifest (CRD may not be installed)`.
 
 ## 3. Everything else — under 1 min
-```
+```powershell
 terraform -chdir=terraform/environments/dev apply
 ```
 **Expect `0 to change, 0 to destroy`, and roughly 18 added** — the five
@@ -99,7 +99,7 @@ out and you need step 5 (`known-gotchas.md` #14).
 
 ## 4. MANUAL — bootstrap the Prometheus Operator CRDs — under 1 min
 Nothing in Terraform or ArgoCD does this, and a cluster destroy removes them.
-```
+```powershell
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update prometheus-community
 Remove-Item C:\temp\crds\kube-prometheus-stack -Recurse -Force -ErrorAction SilentlyContinue
@@ -109,7 +109,8 @@ kubectl apply --server-side --force-conflicts -f C:\temp\crds\kube-prometheus-st
 kubectl get crd | Select-String monitoring.coreos.com
 ```
 
-Pass the **directory**, not a `crd-*.yaml` glob. PowerShell does not expand globs
+`C:\temp\crds` is arbitrary — any writable path works, but it must match in
+all four lines. Pass the **directory**, not a `crd-*.yaml` glob. PowerShell does not expand globs
 for native commands, so kubectl receives the literal `crd-*.yaml` and fails with
 `The filename, directory name, or volume label syntax is incorrect` — the glob
 form has never worked as written on this shell (`known-gotchas.md` #20). Every
@@ -132,7 +133,7 @@ match the chart ArgoCD is deploying. Why this is manual, and why the chart is to
 Skip this if step 4 followed step 3 promptly; on a clean run it is not needed. Use
 it only when the Application sits at `OutOfSync / Missing` with the CRDs already
 present — ArgoCD has exhausted its retries and a refresh will not restart it.
-```
+```powershell
 '{"operation":{"initiatedBy":{"username":"manual"},"sync":{"syncOptions":["ServerSideApply=true"],"prune":true}}}' | Set-Content sync.json -Encoding ascii
 kubectl -n argocd patch application observability --type merge --patch-file sync.json
 ```
@@ -141,7 +142,7 @@ with `error decoding patch` (#20). Write the file `-Encoding ascii`; `utf8` adds
 BOM (#16). Reaches `Synced / Healthy` about two minutes later.
 
 ## Verification
-```
+```powershell
 kubectl get nodes
 kubectl -n argocd get applications
 kubectl get pods -A | Select-String -Pattern "Pending|Error|CrashLoop"

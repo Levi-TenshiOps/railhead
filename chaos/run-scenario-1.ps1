@@ -21,17 +21,27 @@ whole session is trying to avoid.
 param(
     [switch]$Apply,
     [string]$Namespace = "railhead",
+    [string]$Template  = "chaos/experiments/01-networkchaos-api-postgres-partition.yaml",
     [string]$OutFile   = "chaos/experiments/.rendered-01.yaml"
 )
 
+# NOTE: $ErrorActionPreference governs CMDLET errors only. It does NOT stop the
+# script when a native executable (kubectl, terraform, aws) exits non-zero --
+# PowerShell 5.1 has no equivalent of 7.3's $PSNativeCommandUseErrorActionPreference.
+# Every kubectl call below therefore checks $LASTEXITCODE explicitly. Skipping
+# that is how a failed injection reads as a successful one (known-gotchas #38).
 $ErrorActionPreference = "Stop"
-$template = "chaos/experiments/01-networkchaos-api-postgres-partition.yaml"
+$template = $Template
 
 if (-not (Test-Path $template)) { throw "Template not found: $template. Run from the repo root." }
 
 # -o jsonpath with embedded quotes is mangled by PowerShell (known-gotchas
 # #20), so go through JSON and let PowerShell do the parsing instead.
-$pods = kubectl -n $Namespace get pods -l app=railhead-api -o json | ConvertFrom-Json
+$podsJson = kubectl -n $Namespace get pods -l app=railhead-api -o json
+if ($LASTEXITCODE -ne 0) {
+    throw "kubectl get pods failed (exit $LASTEXITCODE). Fix the cluster connection first -- without this check the script would instead report 'found 0 ready pods' and send you looking at pod health."
+}
+$pods = $podsJson | ConvertFrom-Json
 
 # @() around the INNER pipeline is load-bearing, not style. In PowerShell 5.1
 # a pipeline that emits exactly one object has no .Count at all -- it returns
@@ -49,6 +59,9 @@ if ($ready.Count -lt 2) {
     throw "Need 2 ready railhead-api pods, found $($ready.Count). Scenario 1 requires a healthy sibling: the remediator refuses to quarantine if doing so would leave nothing serving traffic."
 }
 
+# Any ready pod is a valid target, so the first two in API order are taken
+# deliberately rather than chosen. Both names are printed below so the run is
+# reproducible from its own output.
 $target  = $ready[0].metadata.name
 $sibling = $ready[1].metadata.name
 
@@ -72,6 +85,9 @@ if ($Apply) {
     Write-Host ""
     Write-Host "Applying..."
     kubectl apply -f $OutFile
+    if ($LASTEXITCODE -ne 0) {
+        throw "kubectl apply failed (exit $LASTEXITCODE). Nothing was injected. An x509 or webhook error here means gotcha #29 is unsettled -- stop and report rather than re-running."
+    }
     Write-Host ""
     Write-Host "Watch the target pod's own metrics FIRST (runbook step 2.2):"
     Write-Host "  kubectl -n $Namespace exec $target -- python -c ""import urllib.request as u; print([l for l in u.urlopen('http://127.0.0.1:8000/metrics').read().decode().splitlines() if 'http_requests_total' in l and '/items' in l])"""

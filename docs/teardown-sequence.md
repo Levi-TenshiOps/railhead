@@ -8,7 +8,7 @@ deliberately kept — they cost pennies and rebuilding them wastes CI time.
 does not carry `-auto-approve`, so it prompts; add it for non-interactive runs.
 
 **First, confirm kubectl is pointed at the cluster you actually mean to destroy.**
-```
+```powershell
 kubectl config current-context
 ```
 It must name `railhead-dev`. This is a **safety check, not a connectivity
@@ -23,7 +23,7 @@ stale kubeconfig aimed at a dead endpoint — it reads as correct either way. St
 1b of `rebuild-sequence.md` is what covers that case.
 
 Confirm DNS resolves before starting; step 5 is a ~11-minute destroy.
-```
+```powershell
 Resolve-DnsName iam.amazonaws.com -ErrorAction Stop | Out-Null; "DNS OK"
 ```
 If that fails — or a command dies mid-run with `no such host` — run `ping
@@ -36,13 +36,13 @@ once the name is known to be valid is this a real DNS problem — see
 
 ## 1. Delete the five ArgoCD Application CRs
 So selfHeal stops recreating what the next steps remove.
-```
+```powershell
 kubectl -n argocd delete application railhead railhead-remediator observability loki alloy
 ```
 
 ## 2. Delete the namespaces those Applications deployed into
 This is the step that actually removes the workloads and their PVCs.
-```
+```powershell
 kubectl delete namespace railhead monitoring
 ```
 Step 1 does **not** do this. These Applications carry no
@@ -63,7 +63,7 @@ ArgoCD Application, so step 5 removes it. Verified: the add-on destroys in about
 step 4.
 
 ## 3. Verify the PVCs are gone and the volumes were released
-```
+```powershell
 kubectl get pvc -A
 kubectl get pv
 aws ec2 describe-volumes --region us-east-1 --filters "Name=status,Values=available"
@@ -81,14 +81,14 @@ the webhooks that guard those CRs stay behind after the controller is gone (see
 below). Once this step runs, a surviving chaos CR can no longer be deleted at
 all — the finalizer has no controller to clear it and the webhook rejects the
 delete. Clear them *first*.
-```
+```powershell
 kubectl get podchaos,networkchaos,stresschaos,iochaos,timechaos,dnschaos,httpchaos -A
 ```
 **Expect no resources found.** If anything is listed, delete it and confirm it
 is gone *before* continuing. This is free today with no experiments running, and
 becomes the difference between a clean teardown and a stuck one the moment
 Week 7 scenarios are live.
-```
+```powershell
 kubectl delete namespace argocd chaos-mesh
 ```
 **Expect around 45 seconds** (measured 45.8s on 2026-08-31). It deletes two
@@ -124,7 +124,7 @@ if chaos-mesh were ever uninstalled on its own, which would leave both the CRDs
 and these webhooks orphaned.
 
 ## 5. Destroy EKS and the VPC together, in one command
-```
+```powershell
 terraform -chdir=terraform/environments/dev destroy "-target=module.eks" "-target=module.vpc"
 ```
 **Expect `0 changed`, everything destroyed, exit 0, in around 11 minutes.** No
@@ -164,7 +164,7 @@ correct state to `errored.tfstate` **in `terraform/environments/dev`, not your
 shell's directory** — `-chdir` relocates it (`known-gotchas.md` #18). Check that
 `lineage` matches the remote state and `serial` is exactly one higher, then push
 it by bare filename; a path relative to your shell fails.
-```
+```powershell
 (Get-Content terraform\environments\dev\errored.tfstate -Raw | ConvertFrom-Json) | Select-Object lineage, serial
 terraform -chdir=terraform/environments/dev state push errored.tfstate
 ```
@@ -172,7 +172,7 @@ terraform -chdir=terraform/environments/dev state push errored.tfstate
 ## 6. Sweep for orphans
 Terraform reporting success is not proof that nothing billable survived —
 Kubernetes-created resources in particular are invisible to it.
-```
+```powershell
 aws ec2 describe-volumes    --region us-east-1 --filters "Name=status,Values=available"
 aws ec2 describe-addresses  --region us-east-1 --query "Addresses[?AssociationId==null]"
 aws elbv2 describe-load-balancers --region us-east-1
@@ -206,7 +206,7 @@ retention is only the backstop.
 Expected if the NAT Gateway is already gone. A `NamespaceDeletionContentFailure`
 condition naming `Resource=pods` confirms it; force-deleting the pods clears the
 blocker and finalization completes in about thirty seconds.
-```
+```powershell
 (kubectl get namespace <ns> -o json | ConvertFrom-Json).status.conditions | Format-List type, message
 kubectl delete pods --all -n <ns> --force --grace-period=0
 ```

@@ -21,7 +21,7 @@ request — the worker's `timeout=5` ties the API's `connect_timeout=5`. Pipe th
 script; PowerShell re-quotes multi-line arguments (gotcha #20). The api image has
 python, no curl.
 
-```
+```powershell
 $pod = (kubectl -n railhead get pods -l app=railhead-api -o json | ConvertFrom-Json).items[0].metadata.name
 Get-Content chaos\tests\metric-on-client-abandon.py | kubectl -n railhead exec -i $pod -- python -
 ```
@@ -36,7 +36,7 @@ unaffected either way — its failures are sub-second.
 ## 2 — Scenario 1: partition one api pod from Postgres
 
 ### 2.1 Render, then inject
-```
+```powershell
 .\chaos\run-scenario-1.ps1
 .\chaos\run-scenario-1.ps1 -Apply
 ```
@@ -45,7 +45,7 @@ Confirm the names differ. **Expect** `networkchaos.chaos-mesh.org/api-postgres-p
 A webhook error means gotcha #29 is unsettled — stop and report.
 
 ### 2.2 Confirm the fault is real, within 90s
-```
+```powershell
 kubectl -n monitoring port-forward svc/observability-kube-prometh-prometheus 9090:9090
 ```
 Service name is `observability-kube-prometh-prometheus` — Helm truncates it.
@@ -62,7 +62,7 @@ If nothing changes after 2 minutes, check
 selection errors and confirm the rendered pod name matches a live pod.
 
 ### 2.3 Confirm blast radius
-```
+```powershell
 kubectl -n railhead get pods -l app=railhead-api -o wide
 kubectl -n railhead get endpointslices -l kubernetes.io/service-name=railhead-api -o wide
 ```
@@ -86,7 +86,7 @@ means something is wrong**, not that the alert is being slow.
 
 ### 2.5 Watch the remediator act
 **Measured: quarantine 12s after FIRING**, Slack message begins `:hospital: Quarantined`.
-```
+```powershell
 kubectl -n railhead get pods --show-labels
 kubectl -n railhead get endpointslices -l kubernetes.io/service-name=railhead-api -o wide
 kubectl -n railhead get deploy railhead-api
@@ -99,7 +99,7 @@ created; Deployment back to `2/2` in ~30s.
 > · `chaos-scenario1-quarantined-labels.png`
 
 ### 2.6 Clean up
-```
+```powershell
 kubectl -n chaos-mesh delete networkchaos api-postgres-partition
 kubectl -n railhead delete pod -l railhead.io/quarantined-at
 kubectl -n railhead get pods -l app=railhead-api
@@ -118,14 +118,14 @@ EndpointSlice.
 Let scenario 1's alert resolve first.
 
 ### 3.1 Inject
-```
+```powershell
 kubectl apply -f chaos\experiments\02-podchaos-postgres-failure.yaml
 kubectl -n chaos-mesh get podchaos postgres-outage
 ```
 No resolver script — `railhead-postgresql-0` is a StatefulSet pod.
 
 ### 3.2 Confirm Postgres is down
-```
+```powershell
 kubectl -n railhead get pods -l app.kubernetes.io/name=postgresql
 kubectl -n railhead get pod railhead-postgresql-0 -o jsonpath="{.spec.containers[0].image}"
 ```
@@ -135,7 +135,7 @@ image swapped to `gcr.io/google-containers/pause:latest`. The pod stays in
 liveness keeps failing; expected.
 
 ### 3.3 Confirm both api pods are failing
-```
+```powershell
 kubectl -n railhead logs -l app=railhead-worker --tail=20
 ```
 **Measured: failures within 30s.** No 5s wait — the ClusterIP Service has no
@@ -143,10 +143,10 @@ ready backends, so connections are refused immediately (`Connection refused`,
 not `timeout expired`).
 
 ### 3.4 The test — does the guard hold?
-```
+```powershell
 kubectl -n railhead get pods --show-labels
-grep -cE "POST /webhook" <remediator log>
-grep -E "Quarantined|Refusing" <remediator log>
+kubectl -n railhead logs deploy/railhead-remediator --tail=2000 | Select-String "POST /webhook" | Measure-Object -Line
+kubectl -n railhead logs deploy/railhead-remediator --tail=2000 | Select-String -Pattern "Quarantined|Refusing"
 ```
 **Measured: it did not.** Both pods quarantined **300s apart**, zero refusals,
 two webhooks each carrying one firing pod. Mechanism: the scorecard's scenario 2
@@ -158,7 +158,7 @@ section, and gotcha #32.
 > is the result of this scenario, not a gap in the evidence.
 
 ### 3.5 Recovery and cleanup
-```
+```powershell
 kubectl -n chaos-mesh delete podchaos postgres-outage
 kubectl -n railhead delete pod -l railhead.io/quarantined-at
 kubectl -n railhead get pods -l app.kubernetes.io/name=postgresql -w
@@ -171,7 +171,7 @@ no quarantine labels.
 
 ### If both pods get quarantined
 Happened, and recoverable in ~30s:
-```
+```powershell
 kubectl -n railhead delete pod -l railhead.io/quarantined-at
 kubectl -n railhead get deploy railhead-api -w
 ```
@@ -186,7 +186,7 @@ Copy `chaos/experiments/02-podchaos-postgres-failure.yaml` to a scratch file,
 rename it `remediator-outage`, point the selector at the live remediator pod,
 keep `duration: 10m`, apply.
 
-```
+```powershell
 kubectl -n railhead get pods -l app=railhead-remediator
 aws cloudwatch describe-alarms --region us-east-1 --alarm-names railhead-dev-remediator-down --query "MetricAlarms[].[StateValue,StateReason]" --output table
 ```
