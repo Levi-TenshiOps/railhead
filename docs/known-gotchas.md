@@ -59,6 +59,8 @@ EKS's default networking limits pods per node by available ENI IP addresses, not
 
 Via a config-checksum annotation baked into the chart — even changes with nothing to do with Grafana (adding a PrometheusRule, in one real case). On a cluster already at its pod-per-node ceiling, the rollout's surge pod can't schedule, because Grafana's PV is AZ-pinned by node affinity and there's no room in that AZ. Grafana keeps serving fine on the old pod the whole time; the Application just shows `Progressing` instead of `Healthy` indefinitely. Fix is deleting the OLD pod (frees both the node slot and the volume attachment) — never the `Pending` one, since the ReplicaSet just recreates that immediately. This is the second time this project has hit the same underlying lesson: to unstick a resource contention deadlock, remove the thing holding the resource first and let the reconciler recreate, don't fight the thing that can't schedule.
 
+**The precondition was removed structurally on 2026-07-24**, when the node group moved from `t3.medium` (17 pods per node) to `t3.large` (35) precisely because the cluster was sitting at 17/17 allocatable with no room for a surge pod. That is why this has not recurred. The AZ-pinning mechanism is unchanged, so a cluster driven back to its ceiling would deadlock the same way.
+
 <a id="3"></a>
 ### 3. Node group instance-type changes force full node replacement
 
@@ -206,7 +208,7 @@ Two lessons worth generalising. **Any command written into a procedure has to be
 
 Step 2 of `rebuild-sequence.md` failed outright with `Unable to locate chart argo-cd: no cached repo found`. `helm repo list` showed all four repositories registered and looked entirely healthy. The cache directory was empty.
 
-The split is the whole problem: the repo *list* lives in `%APPDATA%\helm\repositories.yaml` and persists indefinitely, while the downloaded *indexes* live in `%TEMP%\helm\repository` — which Windows disk cleanup purges. So `helm repo list` keeps reporting four repositories long after none of them are usable, and the Terraform `helm` provider, which reads the index rather than the list, fails on the first chart it tries to resolve. The error names `bitnami-index.yaml` regardless of which chart you asked for, because the provider enumerates every configured repo before giving up.
+The split is the whole problem: the repo *list* lives in `%APPDATA%\helm\repositories.yaml` and persists indefinitely, while the downloaded *indexes* live in `%TEMP%\helm\repository`, which gets emptied between sessions. So `helm repo list` keeps reporting four repositories long after none of them are usable, and the Terraform `helm` provider, which reads the index rather than the list, fails on the first chart it tries to resolve. The error names `bitnami-index.yaml` regardless of which chart you asked for, because the provider enumerates every configured repo before giving up.
 
 It is also **time-dependent**, which is why three verified cycles never caught it: rebuild soon after the previous session and the cache is still warm; rebuild after cleanup has run and step 2 fails. Nothing about the procedure changed between the runs that worked and the run that didn't.
 
@@ -311,7 +313,9 @@ ERROR chaos-daemon.daemon-server  grant access to /dev/fuse
 
 **Scoped risk, not a confirmed failure.** `/dev/fuse` backs Chaos Mesh's FUSE-based filesystem injection, so **IOChaos may be degraded or unusable** here. This has not been tested. PodChaos, NetworkChaos, StressChaos, TimeChaos, DNSChaos and HTTPChaos are unaffected.
 
-**Action required before Week 7 scenario design.** The planned storage-latency scenario is modelled on vSAN incidents, and IOChaos is the obvious tool for it. Verify IOChaos works before committing to that scenario, not during it. If it does not, the alternatives are StressChaos on disk I/O, or NetworkChaos latency against Postgres.
+**What this cost, and the decision it forced.** Week 7 had planned a storage-latency scenario modelled on the vSAN incidents behind this project, and IOChaos is the obvious tool for it. **That scenario was dropped.** IOChaos depends on FUSE, `/dev/fuse` cannot be granted on these cgroup v2 nodes, and the alternatives — StressChaos on disk I/O, or NetworkChaos latency against Postgres — model something different enough that calling either a storage-latency test would have been dishonest.
+
+Dropped on a measured constraint, before a session was spent on it rather than during one. Week 7 ran a **NetworkChaos partition** against Postgres instead — a clean dependency-isolation fault rather than a degraded-storage one. See `week7-chaos-scorecard.md` for what the two scenarios that did run produced.
 
 Worth naming for its shape: this is the **inverse** of the recurring "configured, reports healthy, does nothing" pattern (#21, #24). This one reports broken and mostly works. Both defeat the same reflex — reading the status line instead of testing the behaviour.
 
@@ -354,7 +358,7 @@ The `ready_replicas` backstop was then defeated benignly: the ReplicaSet's repla
 
 **A guard that permits has not "refused".** That distinction was lost three separate times while writing this up — in the README summary, in the alert's own `description` annotation, and in a code comment beside the rule — each drifting into language that credited a control with *acting* when it had merely *passed*. It reads better, which is exactly why it happens, and it is the kind of claim someone relies on at 3am. This entry stated it correctly from the start, which is the only reason the drift in the summaries was visible at all. When writing up a safety control, check whether it fired or was simply never the binding constraint.
 
-**A wrong claim about a safety control travels faster than its correction.** This one reached six places — the README summary, the Architecture bullet, the alert's own `description` annotation, a code comment beside the rule, the chaos scorecard, and the on-call runbook — and took four separate review passes to clear. The runbook was found **last**, which is the wrong order: it is the only one of the six that someone reads at 3am while deciding what to do. When a claim about a control turns out to be wrong, enumerate every place it was asserted before fixing any of them, and start with the operational documents.
+**A wrong claim about a safety control travels faster than its correction.** This one reached six places — the README summary, the Architecture bullet, the alert's own `description` annotation, a code comment beside the rule, the chaos scorecard, and the on-call runbook — and took four separate review passes to clear. The runbook was found **last**, which is the wrong order: it is the only one of the six that someone reads at 3am while deciding what to do. When a claim about a control turns out to be wrong, enumerate every place it was asserted before fixing any of them, and start with the operational documents. This entry was violated within one turn of being written: the README instance was corrected, the scorecard was not enumerated, and a **seventh** site surfaced on the next pass. Fixing one instance and moving on is the failure mode — the enumeration is the work.
 
 **What to do.** Count pods from the alert *group* rather than firing-only; or gate on Deployment-level unavailable replicas; or add a cooldown between quarantines. Not applied — the measured behaviour is the artifact.
 

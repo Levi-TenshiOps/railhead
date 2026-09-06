@@ -5,11 +5,16 @@ scenario 1 re-run **2026-09-05** after a fix. Predictions were written down befo
 and are not edited afterwards. **All timestamps are UTC**, matching what Prometheus
 and the container logs record.
 
-**None of these defects were findable by reading the code.** Two independent
-design reviews ran against the remediator beforehand; both predicted scenario 2
-would fail, and **both named the wrong mechanism**, blaming Alertmanager's grouping —
-which worked correctly throughout. A defect whose cause two careful reviews get
-wrong is one only a live run will explain.
+**A third scenario was planned and dropped.** Storage latency, modelled on vSAN
+incidents, needed IOChaos — which depends on FUSE, and `/dev/fuse` cannot be
+granted on these cgroup v2 nodes. Dropped on a measured constraint before a
+session went into it, rather than during one ([`known-gotchas.md`](known-gotchas.md) #30).
+
+**Reading the code found the risk; only running it found the cause.** Two
+independent design reviews ran against the remediator beforehand; both predicted
+scenario 2 would fail, and **both named the wrong mechanism**, blaming
+Alertmanager's grouping — which worked correctly throughout. A defect whose cause
+two careful reviews get wrong is one only a live run will explain.
 
 | | Scenario | Predicted | **Measured** |
 |---|---|---|---|
