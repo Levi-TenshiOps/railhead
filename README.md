@@ -147,8 +147,8 @@ I wanted actual proof here, not just claims — so this folder has real `terrafo
 The `railhead` Application's full resource tree in ArgoCD — Secret, Services, ServiceAccount, Deployment, ReplicaSet, pods, StatefulSet, PVC, NetworkPolicy, PodDisruptionBudget and StorageClass, every one green. This is what "deployed by GitOps" actually looks like:
 ![ArgoCD resource tree for the railhead Application, all resources healthy and synced](screenshots/argocd-synced.png)
 
-The same platform **mid-incident**, which is the half most portfolios never show: the observability Application `Progressing`, eight stale Grafana ReplicaSet revisions stacked up during a PVC-reset troubleshooting session. Nothing is broken here — this is a rollout being watched while it catches up:
-![ArgoCD resource tree mid-troubleshooting, observability app Progressing with eight stacked Grafana ReplicaSets](screenshots/argocd-debug-resource-tree.png)
+The same platform **mid-incident**, which is the half most portfolios never show. The observability Application is stuck `Progressing` — deadlocked, not catching up. Any value change triggers a Grafana rollout via a config-checksum annotation, but the new pod can't schedule: Grafana's volume is AZ-pinned by node affinity and that AZ's node was already at its pod ceiling. The old pod (`3/3`, 9 hours) kept serving the whole time while the new one sat `Pending` (`0/3`, 3 minutes), eight ReplicaSet revisions deep. The fix is counterintuitive — delete the *old* pod to free the node slot and the volume attachment, never the `Pending` one, which the ReplicaSet immediately recreates ([Known Gotchas](docs/known-gotchas.md) #2):
+![ArgoCD resource tree with the observability app stuck Progressing, a Pending Grafana pod behind eight ReplicaSet revisions](screenshots/argocd-debug-resource-tree.png)
 
 Detection and repair in one picture: the error rate spikes as the fault takes hold, holds while the pod keeps serving broken traffic, then drops back to zero the moment quarantine restores capacity:
 ![Grafana error rate panel showing the spike and recovery around the quarantine event](screenshots/remediator-grafana-recovery.png)
@@ -226,8 +226,8 @@ Worker logs, alternating `GET`/`POST` calls against the API on a fixed interval:
 Full resource tree for the `railhead` Application (API, worker, Postgres StatefulSet, and their supporting resources) — *also shown above*:
 ![ArgoCD resource tree for the railhead Application](screenshots/argocd-synced.png)
 
-Mid-incident resource tree from the Grafana PVC-reset troubleshooting session, showing several stale Grafana ReplicaSet revisions while the rollout was still catching up — the debugging process itself, not just the clean end state. *Also shown above*:
-![ArgoCD resource tree mid-troubleshooting during the Grafana PVC-reset incident](screenshots/argocd-debug-resource-tree.png)
+Resource tree during the Grafana rollout deadlock of [Known Gotchas](docs/known-gotchas.md) #2 — the Application stuck `Progressing`, the surge pod `Pending` behind eight ReplicaSet revisions because Grafana's AZ-pinned volume had nowhere to schedule. The debugging process itself, not just the clean end state. *Also shown above*:
+![ArgoCD resource tree with the observability app stuck Progressing, a Pending Grafana pod behind eight ReplicaSet revisions](screenshots/argocd-debug-resource-tree.png)
 
 Self-heal proof: manually scaling the API to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to 2 replicas by ArgoCD, with zero human intervention:
 ![kubectl events showing ArgoCD self-heal reverting a manual scale-to-zero](screenshots/argocd-selfheal.png)
