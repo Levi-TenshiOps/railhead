@@ -76,7 +76,7 @@ Both arrows out of Alertmanager come from a *single* receiver: every alert reach
 
 ## Chaos Engineering
 
-Before this, the remediator had only ever been validated against a fault built by hand to trigger it. That proves the code path runs. It proves nothing about how the system behaves when a failure arrives on its own terms. **Chaos engineering exists to find where a system does not do what its design says — before a real incident finds it instead.**
+Before this, the remediator had only ever been validated against a fault built by hand to trigger it. That proves the code path runs. It proves nothing about how the system behaves when a failure arrives on its own terms.
 
 Two scenarios were chosen to test the remediator in both directions, because a remediation system has two correct behaviours and only one is usually tested: it must **act** on one bad pod, and **refuse** when the shared dependency is down, since there every replacement inherits the same fault. A third check pointed the same question at the monitoring itself.
 
@@ -100,7 +100,7 @@ Excluding `/metrics` from all five rules and re-running the same scenario: **5m4
 
 Both api pods were quarantined **300s apart** with **zero refusals**, during the shared outage the guard exists to prevent. Cause: a **self-erasing evidence loop** — quarantining the first pod drops it from the Service, so Prometheus stops scraping it and its alert resolves, leaving the second looking like a lone failure. Dissected under [Automated Remediation](#automated-remediation) above and in [gotcha #32](docs/known-gotchas.md).
 
-**It cost no outage.** `readyReplicas` dipped to 1 for about three minutes and never reached 0 — a replacement was Ready before the second quarantine, so `MIN_REMAINING_READY` permitted both actions rather than having to block one. The floor was there and was never reached; what failed was the layer meant to prevent churn.
+**No outage.** `readyReplicas` dipped to 1 for about three minutes and never reached 0; `MIN_REMAINING_READY` permitted both actions rather than blocking one. What failed was the layer meant to prevent churn.
 
 ### Check 3 — a blind spot in the monitoring itself
 
@@ -110,9 +110,7 @@ Ten minutes with the remediator `0/1` Ready, zero endpoints, `CrashLoopBackOff`,
 
 ### What the exercise produced
 
-One component validated against an untuned fault. One defect found, mechanism understood down to the 65s timer desynchronisation, fix identified. One monitoring blind spot found before it mattered. One alert defect fixed and re-measured.
-
-Only the last was applied. The rest stay recommendations on purpose: the measured behaviour is the artifact, and a guard that silently starts working — with no record of why it didn't — teaches nobody anything.
+Only the `/metrics` fix was applied. The rest stay recommendations on purpose: the measured behaviour is the artifact, and a guard that silently starts working — with no record of why it didn't — teaches nobody anything.
 
 Full numbers: [`docs/week7-chaos-scorecard.md`](docs/week7-chaos-scorecard.md). Commands: [`docs/week7-chaos-runbook.md`](docs/week7-chaos-runbook.md). Manifests: [`chaos/`](chaos/).
 
