@@ -2,7 +2,7 @@
 
 Railhead is a portfolio project built to prove something specific: that I can run the full lifecycle of a production service on AWS, not just describe it in an interview. It provisions its own infrastructure with Terraform, deploys itself through GitOps with ArgoCD, and monitors itself with real SLOs and burn-rate alerting — verified end-to-end against a live AWS account.
 
-Automated remediation is built: when a pod is serving majority errors while its siblings stay healthy, a script quarantines it — relabeling it out of the Service and ReplicaSet selectors so traffic stops and a healthy replacement is created, while the broken pod keeps running for inspection.
+Automated remediation is built and running: a Flask service takes Alertmanager's webhooks, and when one pod is serving majority errors while its siblings stay healthy, it quarantines that pod. A single label patch drops it out of both the Service and the ReplicaSet selectors at once — traffic stops, a healthy replacement is created, and the broken pod keeps running for inspection. Three guards decide when *not* to act.
 
 Injecting real faults into the running cluster then turned up a defect in that remediator — see [Chaos Engineering](#chaos-engineering) below.
 
