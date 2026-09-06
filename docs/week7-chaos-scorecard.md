@@ -63,11 +63,17 @@ The delay is not the problem: **on a shorter fault, a tighter scrape interval, o
 lower real traffic this alert does not fire at all**, and a pod serving nothing
 but errors goes unreported. Fix and full reasoning: gotcha #33.
 
-**Mechanism confirmed as predicted.** Probed failure latency **5.10s / 5.01s /
-5.01s** — precisely `connect_timeout=5`. The 5xx come from failed *new*
-connections; the original pooled connection blocks in `recv()` until TCP
-retransmission gives up. Without `connect_timeout` the pod would hang silently
-and never alert.
+**Mechanism confirmed as predicted.** Every failing request took almost exactly
+5 seconds. Mean `/items` duration on the partitioned pod was **5.006s** for nine
+minutes straight; its healthy sibling served the same endpoint in **0.005s**.
+That 5-second wall is `connect_timeout=5`.
+
+So the 5xx came from *new* connections timing out, not from the pooled one. The
+pooled connection just blocks in `recv()` until TCP gives up. Without
+`connect_timeout` the pod would hang silently and never alert at all.
+
+The histogram could not show this on its own — its buckets stop at 1 second, so
+every failure landed in `+Inf`. The 5.006s came from `_sum / _count` instead.
 
 ```
 File "/app/main.py", line 103, in create_item
@@ -221,13 +227,15 @@ Fix and the independence tradeoff: gotcha #34.
 `railhead-alert-rules` (**re-captured 2026-09-05** after the scenario 1 fix — it shows the
 rules as they stand now, not as they were during the 13m52s run)
 
-**Three planned screenshots do not exist. Each absence is a result:**
+**Three planned captures were never taken, and two of those absences are
+themselves results:**
 
-| Planned | Why |
-|---|---|
-| `chaos-scenario1-alert-firing` | Alert had resolved before capture; the Slack message proves it fired |
-| `chaos-scenario2-multipod-refusal-slack` | **There was no refusal** — scenario 2's finding |
-| `chaos-check-remediator-down-alarm` | **The alarm never fired** — the check's finding |
+- **No alert-in-FIRING screenshot.** It had resolved before one could be taken.
+  The Slack message is the record that it fired.
+- **No refusal screenshot — because no refusal happened.** That is scenario 2's
+  finding.
+- **No alarm screenshot — because the alarm never fired.** That is the
+  meta-monitoring check's finding.
 
 ---
 

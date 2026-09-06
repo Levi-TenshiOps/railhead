@@ -81,8 +81,8 @@ PENDING 5m39s → **abandoned** 7m12s → PENDING 11m49s → FIRING 13m52s, osci
 expect now — a PENDING that holds and converts. **An abandoned PENDING today
 means something is wrong**, not that the alert is being slow.
 
-> `chaos-scenario1-alert-firing.png` — **not captured**; the alert resolved
-> first. The Slack message proves it fired.
+> No screenshot of the alert in FIRING state exists — it had already resolved by
+> the time one was taken. The Slack message is the record that it fired.
 
 ### 2.5 Watch the remediator act
 **Measured: quarantine 12s after FIRING**, Slack message begins `:hospital: Quarantined`.
@@ -153,8 +153,9 @@ two webhooks each carrying one firing pod. Mechanism: the scorecard's scenario 2
 section, and gotcha #32.
 
 > `chaos-scenario2-grouped-alert.png` · `chaos-scenario2-cascade-state.png`
-> `chaos-scenario2-multipod-refusal-slack.png` — **does not exist; there was no
-> refusal.**
+>
+> **There is no refusal screenshot, because no refusal happened.** That absence
+> is the result of this scenario, not a gap in the evidence.
 
 ### 3.5 Recovery and cleanup
 ```
@@ -194,8 +195,8 @@ aws cloudwatch describe-alarms --region us-east-1 --alarm-names railhead-dev-rem
 endpoints, `CrashLoopBackOff`, 8 restarts, for the full 10 minutes, while
 `service_number_of_running_pods` reported `1.0` every minute (gotcha #34).
 
-> `chaos-check-remediator-down-alarm.png` — **does not exist; the alarm never
-> fired.**
+> **There is no alarm screenshot, because the alarm never fired.** That is the
+> finding this check produced.
 
 Clean up: `kubectl -n chaos-mesh delete podchaos remediator-outage`, confirm the
 remediator returns to `1/1 Ready`.

@@ -90,7 +90,7 @@ Two scenarios were chosen to test the remediator in both directions, because a r
 
 ### Scenario 1 — worked, and surfaced a defect that was then fixed
 
-The remediator handled a fault it was never tuned for. It identified the partitioned pod, quarantined it **12s** after the alert fired on the first run (30s on the re-run below), and had a replacement serving traffic **~30s** later, leaving the broken pod running for inspection; the sibling never alerted. Failure latency measured **5.10s / 5.01s / 5.01s** — precisely `connect_timeout=5`, confirming the 5xx came from failed *new* connections.
+The remediator handled a fault it was never tuned for. It identified the partitioned pod, quarantined it **12s** after the alert fired on the first run (30s on the re-run below), and had a replacement serving traffic **~30s** later, leaving the broken pod running for inspection; the sibling never alerted. Mean `/items` latency on the partitioned pod held at **5.006s** for nine consecutive minutes against **0.005s** on its healthy sibling — pinning the failures to `connect_timeout=5`, and confirming the 5xx came from failed *new* connections rather than the pooled one.
 
 The find was in the alert beneath it. `/metrics` sat in the denominator at **~45%**, holding the error ratio oscillating **0.438–0.550** across a 0.5 threshold with a ceiling of **~0.51** — a **2% margin** — and one PENDING period was **abandoned** mid-count. Detection took **13m52s**; on a shorter fault it would not have fired at all.
 
@@ -142,25 +142,28 @@ Real problems hit while building this, kept in [`docs/known-gotchas.md`](docs/kn
 
 ## Screenshots
 
-I wanted actual proof here, not just claims — so this folder has real `terraform apply`/`destroy` output, AWS Console views, `kubectl`/ArgoCD/Grafana output, and Slack alerts, organized by component under `screenshots/`. I only capture things that don't already have a permanent record somewhere else. The five below are the headline proofs; the rest are grouped by component in the collapsible sections under them.
+I wanted actual proof here, not just claims — so this folder has real `terraform apply`/`destroy` output, AWS Console views, `kubectl`/ArgoCD/Grafana output, and Slack alerts, organized by component under `screenshots/`. I only capture things that don't already have a permanent record somewhere else. **The six below are a preview**; each also appears in its topic gallery underneath, alongside everything else.
 
-Self-heal proof: manually scaling the API to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to 2 replicas by ArgoCD, with zero human intervention:
-![kubectl events showing ArgoCD self-heal reverting a manual scale-to-zero](screenshots/argocd-selfheal.png)
+The `railhead` Application's full resource tree in ArgoCD — Secret, Services, ServiceAccount, Deployment, ReplicaSet, pods, StatefulSet, PVC, NetworkPolicy, PodDisruptionBudget and StorageClass, every one green. This is what "deployed by GitOps" actually looks like:
+![ArgoCD resource tree for the railhead Application, all resources healthy and synced](screenshots/argocd-synced.png)
 
-Real burn-rate alerts arriving in Slack, critical (🔴) and warning (🟡) visually distinct — triggered by deliberately taking Postgres offline and generating a burst of failing requests, not simulated:
-![Slack messages showing critical and warning burn-rate alerts with distinct color/emoji](screenshots/slack-burnrate-alert.png)
+The same platform **mid-incident**, which is the half most portfolios never show: the observability Application `Progressing`, eight stale Grafana ReplicaSet revisions stacked up during a PVC-reset troubleshooting session. Nothing is broken here — this is a rollout being watched while it catches up:
+![ArgoCD resource tree mid-troubleshooting, observability app Progressing with eight stacked Grafana ReplicaSets](screenshots/argocd-debug-resource-tree.png)
 
-A real quarantine, triggered by an actual DNS-corruption fault injection, not a synthetic payload — the evidence block shows the pod's own logs at the moment of failure:
+Detection and repair in one picture: the error rate spikes as the fault takes hold, holds while the pod keeps serving broken traffic, then drops back to zero the moment quarantine restores capacity:
+![Grafana error rate panel showing the spike and recovery around the quarantine event](screenshots/remediator-grafana-recovery.png)
+
+A real quarantine in Slack, triggered by an actual DNS-corruption fault injection rather than a synthetic payload — the evidence block carries the pod's own traceback from the moment it failed:
 ![Slack quarantine message with the evidence block from a real fault injection](screenshots/remediator-quarantine-slack.png)
 
-Pods after quarantine: the broken pod relabeled to `railhead-api-quarantined`, its replacement already `Running` alongside the untouched control pod:
-![kubectl get pods --show-labels showing the quarantined pod and its replacement](screenshots/remediator-pods-after.png)
-
-The guard failure, caught live: **both** api pods quarantined during a shared-dependency outage, which is exactly what the `multi_pod` guard exists to prevent. This is the most useful artifact in the repo — a defect in my own automation, found by running it rather than by reading it:
+The guard failure, caught live: **both** api pods quarantined during a shared-dependency outage, which is exactly what the `multi_pod` guard exists to prevent. A defect in my own automation, found by running it rather than by reading it:
 ![kubectl output showing both api pods quarantined and their replacements during the Postgres outage](screenshots/chaos-scenario2-cascade-state.png)
 
+RBAC checked from **outside** the cluster, against the EKS audit log rather than by reading the Role back. Every API-server caller over three hours, ranked — including `kube-scheduler` and `kube-controller-manager`, which AWS exposes no metrics endpoint for and Prometheus therefore cannot see:
+![Logs Insights query ranking API server callers by request count](screenshots/cloudwatch-logs-insights-top-callers.png)
+
 <details>
-<summary><b>VPC (3 screenshots)</b></summary>
+<summary><b>Infrastructure — VPC (3 screenshots)</b></summary>
 
 VPC module terraform apply output:
 ![VPC module terraform apply output](screenshots/vpc-apply.png)
@@ -174,7 +177,7 @@ VPC module terraform destroy output:
 </details>
 
 <details>
-<summary><b>IAM / OIDC (2 screenshots)</b></summary>
+<summary><b>Infrastructure — IAM / OIDC (2 screenshots)</b></summary>
 
 IAM/OIDC module terraform apply output:
 ![IAM/OIDC module terraform apply output](screenshots/iam-apply.png)
@@ -185,7 +188,7 @@ GitHub Actions IAM role's Trust relationships tab, showing the OIDC condition:
 </details>
 
 <details>
-<summary><b>ECR (2 screenshots)</b></summary>
+<summary><b>Infrastructure — ECR (2 screenshots)</b></summary>
 
 Terraform apply that created the first ECR repository and tightened the GitHub Actions OIDC trust condition from an any-branch wildcard (`repo:Levi-TenshiOps/railhead:*`) to main-branch-only (`repo:Levi-TenshiOps/railhead:ref:refs/heads/main`) — every line of the old policy carries a removal prefix, confirming this is the wildcard being replaced, not left in place. See `iam-trust-policy.png` above for the resulting policy live in the console:
 ![ECR module terraform apply output](screenshots/ecr-apply.png)
@@ -196,7 +199,7 @@ ECR repository settings (immutable tags, scan-on-push), from before the split in
 </details>
 
 <details>
-<summary><b>EKS (2 screenshots)</b></summary>
+<summary><b>Infrastructure — EKS (2 screenshots)</b></summary>
 
 EKS module terraform apply output (cluster, node group, and IRSA-backed add-ons):
 ![EKS module terraform apply output](screenshots/eks-apply.png)
@@ -218,16 +221,19 @@ Worker logs, alternating `GET`/`POST` calls against the API on a fixed interval:
 </details>
 
 <details>
-<summary><b>GitOps — ArgoCD (3 more screenshots)</b></summary>
+<summary><b>GitOps — ArgoCD (4 screenshots)</b></summary>
+
+Full resource tree for the `railhead` Application (API, worker, Postgres StatefulSet, and their supporting resources) — *also shown above*:
+![ArgoCD resource tree for the railhead Application](screenshots/argocd-synced.png)
+
+Mid-incident resource tree from the Grafana PVC-reset troubleshooting session, showing several stale Grafana ReplicaSet revisions while the rollout was still catching up — the debugging process itself, not just the clean end state. *Also shown above*:
+![ArgoCD resource tree mid-troubleshooting during the Grafana PVC-reset incident](screenshots/argocd-debug-resource-tree.png)
+
+Self-heal proof: manually scaling the API to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to 2 replicas by ArgoCD, with zero human intervention:
+![kubectl events showing ArgoCD self-heal reverting a manual scale-to-zero](screenshots/argocd-selfheal.png)
 
 Early GitOps state, from 07/17/2026 when only the app and observability Applications existed — both `Healthy` and `Synced`. See the remediation group below for all five Applications as they stand now:
 ![Both ArgoCD Applications healthy and synced](screenshots/argocd-observability-synced.png)
-
-Full resource tree for the `railhead` Application (API, worker, Postgres StatefulSet, and their supporting resources):
-![ArgoCD resource tree for the railhead Application](screenshots/argocd-synced.png)
-
-Mid-incident resource tree from the Grafana PVC-reset troubleshooting session, showing several stale Grafana ReplicaSet revisions while the rollout was still catching up — the debugging process itself, not just the clean end state:
-![ArgoCD resource tree mid-troubleshooting during the Grafana PVC-reset incident](screenshots/argocd-debug-resource-tree.png)
 
 </details>
 
@@ -257,7 +263,24 @@ Grafana Explore, Loki datasource, a live LogQL query pulling real `railhead-api`
 </details>
 
 <details>
-<summary><b>Automated remediation — 4 more screenshots</b></summary>
+<summary><b>Alerting — Slack (1 screenshot)</b></summary>
+
+Real burn-rate alerts arriving in Slack, critical (🔴) and warning (🟡) visually distinct — triggered by deliberately taking Postgres offline and generating a burst of failing requests, not simulated:
+![Slack messages showing critical and warning burn-rate alerts with distinct color/emoji](screenshots/slack-burnrate-alert.png)
+
+</details>
+
+<details>
+<summary><b>Automated remediation (6 screenshots)</b></summary>
+
+A real quarantine in Slack, with the evidence block carrying the pod's own traceback — *also shown above*:
+![Slack quarantine message with the evidence block from a real fault injection](screenshots/remediator-quarantine-slack.png)
+
+Grafana's error-rate panel across the fault's whole lifecycle: spike, hold, then a sharp drop to zero as quarantine restores capacity — *also shown above*:
+![Grafana error rate panel showing spike and recovery around the quarantine event](screenshots/remediator-grafana-recovery.png)
+
+Pods after quarantine: the broken pod relabeled to `railhead-api-quarantined`, its replacement already `Running` alongside the untouched control pod:
+![kubectl get pods --show-labels showing the quarantined pod and its replacement](screenshots/remediator-pods-after.png)
 
 All 5 ArgoCD Applications `Synced`/`Healthy` with the remediator deployed:
 ![ArgoCD showing all 5 Applications Synced and Healthy](screenshots/remediator-argocd-healthy.png)
@@ -268,19 +291,19 @@ Guard rails refusing to act across four synthetic payloads: an unknown alert obs
 EndpointSlice after quarantine: only the two healthy pod IPs remain — the quarantined pod's IP is gone:
 ![EndpointSlice showing only the two healthy pod IPs after quarantine](screenshots/remediator-endpoints-after.png)
 
-Grafana's error-rate panel, showing the fault's entire lifecycle: a clean spike as the fault took hold, holding while the pod kept serving broken traffic, then a sharp drop back to zero the moment quarantine restored capacity:
-![Grafana error rate panel showing spike and recovery around the quarantine event](screenshots/remediator-grafana-recovery.png)
-
 </details>
 
 <details>
-<summary><b>Chaos engineering (6 screenshots)</b></summary>
+<summary><b>Chaos engineering (7 screenshots)</b></summary>
 
-The Chaos Mesh dashboard with the scenario 1 NetworkChaos experiment running — the partition between one api pod and Postgres, injected by hand and deleted afterwards:
-![Chaos Mesh dashboard showing the api-postgres-partition experiment](screenshots/chaos-mesh-dashboard.png)
+Both api pods quarantined during the Postgres outage — the `multi_pod` guard failing to engage. *Also shown above*:
+![kubectl output showing both api pods quarantined and their replacements during the Postgres outage](screenshots/chaos-scenario2-cascade-state.png)
 
-The failure mechanism, measured rather than assumed: probed latency of **5.10s / 5.01s / 5.01s** on the partitioned pod — precisely `connect_timeout=5`, confirming the 5xx come from failed *new* connections rather than the pooled one:
-![Terminal output showing 5.10s, 5.01s and 5.01s failure latencies against the partitioned pod](screenshots/chaos-scenario1-failure-mechanism.png)
+The Chaos Mesh dashboard after the install smoke test — a `worker-pod-kill` experiment that confirmed fault injection actually worked before any real scenario was run against the app:
+![Chaos Mesh dashboard showing the completed worker-pod-kill smoke test experiment](screenshots/chaos-mesh-dashboard.png)
+
+The failure itself, in Slack: the `psycopg2.OperationalError: ... timeout expired` traceback from the partitioned pod, alongside the burn-rate alerts it set off. That timeout is `connect_timeout=5` doing its job — without it the pod would hang silently instead of erroring:
+![Slack showing the psycopg2 timeout traceback from the partitioned pod and the burn-rate alerts it triggered](screenshots/chaos-scenario1-failure-mechanism.png)
 
 Scenario 1's quarantine in Slack, 12s after the alert fired — against a network partition the remediator was never tuned for:
 ![Slack message showing the remediator quarantining the partitioned api pod](screenshots/chaos-scenario1-remediator-slack.png)
@@ -289,7 +312,7 @@ Labels after that quarantine: `app` rewritten to `railhead-api-quarantined` plus
 ![kubectl get pods --show-labels showing the quarantine labels on the partitioned pod](screenshots/chaos-scenario1-quarantined-labels.png)
 
 Scenario 2's grouped alert — both api pods failing at once under the Postgres outage. Alertmanager's grouping worked correctly here; the guard still didn't engage, for reasons in [Chaos Engineering](#chaos-engineering) above:
-![Alertmanager showing both api pods grouped in one firing alert](screenshots/chaos-scenario2-grouped-alert.png)
+![Slack showing both api pods carried in a single grouped alert notification](screenshots/chaos-scenario2-grouped-alert.png)
 
 The alert rules as they stand **after** the `/metrics` fix — all five carrying `handler!~"/health|/metrics"`, across all three rule groups, loaded and healthy in Prometheus:
 ![Prometheus alerts page showing all five railhead rules with the /health and /metrics exclusion](screenshots/railhead-alert-rules.png)
@@ -314,7 +337,7 @@ Both log groups at 1-day retention — the fix for never-expiring groups outlivi
 Least-privilege, checked from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and the audit log shows exactly one was ever exercised: `list pods`, twice, in `railhead`. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
 ![Logs Insights query showing the remediator ServiceAccount made only list-pods calls](screenshots/cloudwatch-logs-insights-least-privilege.png)
 
-Top API-server callers over a 3-hour window. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each, and neither is scraped by Prometheus here — AWS exposes no metrics endpoint for them:
+Top API-server callers over a 3-hour window. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each, and neither is scraped by Prometheus here — AWS exposes no metrics endpoint for them. *Also shown above*:
 ![Logs Insights query ranking API server callers by request count](screenshots/cloudwatch-logs-insights-top-callers.png)
 
 </details>
