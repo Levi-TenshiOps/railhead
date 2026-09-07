@@ -89,8 +89,11 @@ if ($Apply) {
         throw "kubectl apply failed (exit $LASTEXITCODE). Nothing was injected. An x509 or webhook error here means gotcha #29 is unsettled -- stop and report rather than re-running."
     }
     Write-Host ""
-    Write-Host "Watch the target pod's own metrics FIRST (runbook step 2.2):"
-    Write-Host "  kubectl -n $Namespace exec $target -- python -c ""import urllib.request as u; print([l for l in u.urlopen('http://127.0.0.1:8000/metrics').read().decode().splitlines() if 'http_requests_total' in l and '/items' in l])"""
+    Write-Host "Watch the alert in PROMETHEUS -- not the pod's own /metrics (runbook step 2.2):"
+    Write-Host "  kubectl -n monitoring port-forward svc/observability-kube-prometh-prometheus 9090:9090"
+    Write-Host "  then http://127.0.0.1:9090/alerts -> RailheadAPIPodErrorRate"
+    Write-Host ""
+    Write-Host "  The pod's own counters are not the signal the alert reads (runbook 2.2)."
 } else {
     Write-Host ""
     Write-Host "Nothing applied. To inject:  kubectl apply -f $OutFile"

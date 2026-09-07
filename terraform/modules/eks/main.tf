@@ -551,10 +551,14 @@ resource "aws_cloudwatch_metric_alarm" "node_filesystem_high" {
   treat_missing_data  = "missing"
 }
 
-# CONTROL PLANE. This is data Prometheus structurally cannot reach on managed
-# EKS -- the API server and etcd are AWS-operated and unscrapeable -- which
-# makes it the clearest example of CloudWatch filling a real capability gap
-# rather than duplicating a Grafana panel.
+# CONTROL PLANE. Note what this alarm is and is not. The API server IS
+# scrapable on managed EKS and this cluster scrapes it, so the metric below is
+# also visible in Prometheus -- this alarm does not fill a metrics gap. What it
+# adds is independence: it lives outside the cluster and survives an outage
+# that takes the in-cluster stack down with it. The genuine Prometheus gaps on
+# managed EKS are kube-scheduler, kube-controller-manager and etcd itself
+# (no reachable endpoints), and the audit log, which is not a metrics endpoint
+# in any configuration -- see docs/cloudwatch-logs-insights-queries.md.
 #
 # Honest framing: this is a growth-anomaly detector, not a capacity alarm.
 # EKS's etcd limit is 8 GB and this cluster sits at 27 MB, so a threshold

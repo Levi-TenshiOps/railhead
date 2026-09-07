@@ -429,7 +429,7 @@ resource "kubernetes_manifest" "observability_application" {
             # scrapes it on a fixed interval, but /items throughput collapses
             # under fault -- each failed request blocks 5s on connect_timeout
             # -- so the scrape share rises exactly when the alert needs it
-            # lowest. That held the per-pod error ratio oscillating 0.471-0.550
+            # lowest. That held the per-pod error ratio oscillating 0.438-0.550
             # against a 0.5 threshold: a 2% margin, one abandoned PENDING, and
             # 13m52s to fire. On a shorter fault it would not have fired at
             # all. Measured, not theorised: docs/week7-chaos-scorecard.md.

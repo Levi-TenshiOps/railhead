@@ -151,7 +151,7 @@ The same platform **mid-incident**, which is the half most portfolios never show
 Detection and repair in one picture: the error rate spikes as the fault takes hold, holds while the pod keeps serving broken traffic, then drops back to zero the moment quarantine restores capacity:
 ![Grafana error rate panel showing the spike and recovery around the quarantine event](screenshots/remediator-grafana-recovery.png)
 
-A real quarantine in Slack, triggered by an actual DNS-corruption fault injection rather than a synthetic payload — the evidence block carries the pod's own traceback from the moment it failed:
+A real quarantine in Slack, triggered by an actual DNS-corruption fault injection rather than a synthetic payload — the evidence block carries the pod's own traceback from the moment it failed. **The alert text above the quarantine is a superseded version** that claims the alert compares replicas; it cannot, and the wording was corrected after chaos testing ([#32](docs/known-gotchas.md#32)):
 ![Slack quarantine message with the evidence block from a real fault injection](screenshots/remediator-quarantine-slack.png)
 
 The guard failure, caught live: **both** api pods quarantined during a shared-dependency outage, which is exactly what the `multi_pod` guard exists to prevent. A defect in my own automation, found by running it rather than by reading it:
@@ -271,7 +271,7 @@ Real burn-rate alerts arriving in Slack, critical (🔴) and warning (🟡) visu
 <details>
 <summary><b>Automated remediation (6 screenshots)</b></summary>
 
-A real quarantine in Slack, with the evidence block carrying the pod's own traceback — *also shown above*:
+A real quarantine in Slack, with the evidence block carrying the pod's own traceback. The alert text above it is a superseded version — see the note on the copy at the top of this section — *also shown above*:
 ![Slack quarantine message with the evidence block from a real fault injection](screenshots/remediator-quarantine-slack.png)
 
 Grafana's error-rate panel across the fault's whole lifecycle: spike, hold, then a sharp drop to zero as quarantine restores capacity — *also shown above*:
@@ -300,16 +300,16 @@ Both api pods quarantined during the Postgres outage — the `multi_pod` guard f
 The Chaos Mesh dashboard after the install smoke test — a `worker-pod-kill` experiment that confirmed fault injection actually worked before any real scenario was run against the app:
 ![Chaos Mesh dashboard showing the completed worker-pod-kill smoke test experiment](screenshots/chaos-mesh-dashboard.png)
 
-The failure itself, in Slack: the `psycopg2.OperationalError: ... timeout expired` traceback from the partitioned pod, alongside the burn-rate alerts it set off. That timeout is `connect_timeout=5` doing its job — without it the pod would hang silently instead of erroring:
+The failure itself, in Slack: the `psycopg2.OperationalError: ... timeout expired` traceback from the partitioned pod, alongside the burn-rate alerts it set off. That timeout is `connect_timeout=5` doing its job — without it the pod would hang silently instead of erroring. The alert body still promises that `railhead-remediator will refuse to act on its multi-pod guard`: that wording predates this exercise and was corrected afterwards, because the guard does not reliably refuse ([#32](docs/known-gotchas.md#32)):
 ![Slack showing the psycopg2 timeout traceback from the partitioned pod and the burn-rate alerts it triggered](screenshots/chaos-scenario1-failure-mechanism.png)
 
-Scenario 1's quarantine in Slack, 12s after the alert fired — against a network partition the remediator was never tuned for:
+Scenario 1's quarantine in Slack, 12s after the alert fired — against a network partition the remediator was never tuned for. The alert body carries the same superseded `will refuse to act on its multi-pod guard` wording noted above:
 ![Slack message showing the remediator quarantining the partitioned api pod](screenshots/chaos-scenario1-remediator-slack.png)
 
 Labels after that quarantine: `app` rewritten to `railhead-api-quarantined` plus the `railhead.io/quarantined-at` timestamp, which is what drops the pod out of both the Service and the ReplicaSet selector:
 ![kubectl get pods --show-labels showing the quarantine labels on the partitioned pod](screenshots/chaos-scenario1-quarantined-labels.png)
 
-Scenario 2's grouped alert — both api pods failing at once under the Postgres outage. Alertmanager's grouping worked correctly here; the guard still didn't engage, for reasons in [Chaos Engineering](#chaos-engineering) above:
+Scenario 2's grouped alert — both api pods failing at once under the Postgres outage. Alertmanager's grouping worked correctly here; the guard still didn't engage, for reasons in [Chaos Engineering](#chaos-engineering) above. Read the alert body against what followed: it states `railhead-remediator will refuse to act on its multi-pod guard`, and both pods were quarantined anyway, 300s apart, with zero refusals. That sentence was corrected afterwards ([#32](docs/known-gotchas.md#32)):
 ![Slack showing both api pods carried in a single grouped alert notification](screenshots/chaos-scenario2-grouped-alert.png)
 
 The alert rules as they stand **after** the `/metrics` fix — all five carrying `handler!~"/health|/metrics"`, across all three rule groups, loaded and healthy in Prometheus:
@@ -332,7 +332,7 @@ Both log groups at 1-day retention — the fix for never-expiring groups outlivi
 `apiserver_storage_size_bytes` graphed — etcd object storage, flat at 28.27 MB as the console renders it, which is 27.0 MiB: the baseline the alarm's 100 MB threshold is set against:
 ![CloudWatch metrics graph of apiserver_storage_size_bytes](screenshots/cloudwatch-apiserver-storage.png)
 
-Least-privilege, checked from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and the audit log shows exactly one was ever exercised: `list pods`, twice, in `railhead`. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
+Least-privilege, checked from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and over a three-hour window the audit log shows exactly one was exercised: `list pods`, twice, in `railhead` — no actionable alert fired in that period. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
 ![Logs Insights query showing the remediator ServiceAccount made only list-pods calls](screenshots/cloudwatch-logs-insights-least-privilege.png)
 
 Top API-server callers over a 3-hour window. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each, and neither is scraped by Prometheus here — AWS exposes no metrics endpoint for them. *Also shown above*:

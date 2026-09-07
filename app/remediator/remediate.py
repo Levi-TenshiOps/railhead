@@ -228,9 +228,25 @@ def webhook():
     payload = request.get_json(silent=True) or {}
     firing = [a for a in payload.get("alerts", []) if a.get("status") == "firing"]
 
-    # Alertmanager groups related alerts into one payload. If more than one pod
-    # is failing at once, the fault is shared (e.g. Postgres is down) and
-    # quarantining cannot help -- every replacement inherits the same problem.
+    # The intent: if more than one pod is failing at once the fault is shared
+    # (e.g. Postgres is down) and quarantining cannot help, because every
+    # replacement inherits the same problem.
+    #
+    # THIS GUARD DOES NOT RELIABLY ENGAGE, and the premise below is why. It
+    # assumes Alertmanager delivers every firing pod in one payload. Week 7
+    # chaos testing DISPROVED that: the pods' `for: 2m` timers desynchronise,
+    # so they arrive in SEPARATE payloads one `group_interval` apart, and each
+    # one looks like a lone failure. Worse, quarantining the first pod drops it
+    # from the Service, Prometheus stops scraping it, and its alert RESOLVES --
+    # so by the second payload the first pod is no longer firing. The
+    # remediator's own action erases the evidence its next decision reads.
+    # Measured: both api pods quarantined 300s apart, zero refusals.
+    #
+    # Left unchanged on purpose. The measured behaviour is the artifact of this
+    # project, and a defect that gets silently patched teaches nobody anything.
+    # Mechanism in full: docs/known-gotchas.md #32. The recommended fix is to
+    # count pods RECENTLY ACTED ON rather than pods CURRENTLY FIRING, reusing
+    # the 15-minute history sweep_and_count() already keeps.
     targets = {
         a.get("labels", {}).get("pod")
         for a in firing
