@@ -40,28 +40,6 @@ Built and torn down incrementally, not left running. The expensive resources —
 
 What persists between sessions is deliberately the cheap half: the S3/DynamoDB state backend, the IAM roles, the ECR repositories, and the S3 bucket holding Loki's log chunks. That's well under $1/month in total, almost all of it ECR image storage — worth paying so nothing has to be rebuilt from scratch. A $50/month budget alarm and a zero-spend alert back the whole thing up. Both live at the account level rather than in this repo's Terraform — deliberately, so that tearing down the workload can never take the spend guardrails down with it.
 
-## Running it yourself
-
-**Prerequisites.** An AWS account you are willing to spend about **$0.31/hour** in, the AWS CLI authenticated against it, Terraform, `kubectl`, and `helm`. Two secrets: a fine-grained GitHub PAT and a Slack incoming-webhook URL. Commands are PowerShell — the sequence docs assume it, and several gotchas here are PowerShell-specific.
-
-**Fork first, then repoint the hard-coded values.** The state bucket name in `terraform/environments/dev/backend.tf`, the ECR registry in both `kubernetes/helm-charts/*/values.yaml`, the CI role ARN in `.github/workflows/ci.yml`, and `github_repo_url` in `terraform/modules/argocd/variables.tf` all name one specific account and repo.
-
-```powershell
-# 1. State backend - once per account. Manages its own state locally,
-#    because it is the thing creating the backend everything else uses.
-Copy-Item terraform/bootstrap/terraform.tfvars.example terraform/bootstrap/terraform.tfvars
-terraform -chdir=terraform/bootstrap init
-terraform -chdir=terraform/bootstrap apply
-
-# 2. Supply the two secrets for the dev environment.
-Copy-Item terraform/environments/dev/terraform.tfvars.example terraform/environments/dev/terraform.tfvars
-terraform -chdir=terraform/environments/dev init
-```
-
-**Then follow [`docs/rebuild-sequence.md`](docs/rebuild-sequence.md) rather than running a bare `terraform apply`.** It is three targeted passes plus a manual CRD bootstrap, roughly 20 minutes, with the expected output at every step. A single apply cannot complete from a destroyed state: the ArgoCD `Application` resources cannot be planned until ArgoCD's own CRDs exist, and the same apply is what installs them ([#12](docs/known-gotchas.md#12)).
-
-**When you are done, follow [`docs/teardown-sequence.md`](docs/teardown-sequence.md) in order.** Step order is load-bearing. Deleting an ArgoCD `Application` does not delete what it deployed, so skipping the namespace deletion in step 2 orphans EBS volumes that bill indefinitely ([#7](docs/known-gotchas.md#7)).
-
 ## Automated Remediation
 
 **The failure this exists for.** `railhead-api` runs 2 replicas behind one Service. `psycopg2`'s `SimpleConnectionPool` is not thread-safe and FastAPI calls it from a threadpool, so a pod whose pool gets corrupted returns 500 on every `/items` request — half the Service's traffic — while still reporting `1/1 Running` and `Ready`. Kubernetes would never notice, because the readiness probe hits `/health`, which deliberately doesn't touch the database — checking a shared dependency in a readiness probe fails every replica at once, turning partial degradation into a total outage.
@@ -158,14 +136,7 @@ Reusable Logs Insights queries, with captured output, are in [`docs/cloudwatch-l
 
 ## Known gotchas
 
-**38 entries**, in [`docs/known-gotchas.md`](docs/known-gotchas.md) — real problems hit while building this, written down and kept. Append-only and numbered permanently, because the sequence docs cross-reference them and those references would rot silently otherwise. Several are load-bearing operational knowledge:
-
-- [#7](docs/known-gotchas.md#7) — deleting an ArgoCD `Application` does **not** delete what it deployed. Skip the namespace deletion at teardown and the EBS volumes orphan and bill indefinitely.
-- [#25](docs/known-gotchas.md#25) — a CloudWatch log group EKS creates for itself outlived `terraform destroy` and reached **1.51 GB**, invisible across three teardowns that were each verified clean. A procedure only verifies what it checks for.
-- [#29](docs/known-gotchas.md#29) — Chaos Mesh generates its admission-webhook certificate at Helm *render* time, so ArgoCD re-renders a fresh one on every sync and TLS breaks. This is why one component is deployed by Terraform instead.
-- [#32](docs/known-gotchas.md#32) — the guard failure above, and the more uncomfortable half: how far a wrong claim about a safety control travelled before it was caught, and in what order.
-- [#36](docs/known-gotchas.md#36) — two published figures were wrong because they were read off a rendered UI instead of queried. If a number goes into a document, query the source.
-- [#38](docs/known-gotchas.md#38) — `$ErrorActionPreference` does not stop a failing native command in PowerShell 5.1, so a script that applied every other gotcha in this file still reported a failed injection as a successful one.
+Real problems hit while building this, kept in [`docs/known-gotchas.md`](docs/known-gotchas.md) rather than quietly fixed and forgotten.
 
 ## Screenshots
 
