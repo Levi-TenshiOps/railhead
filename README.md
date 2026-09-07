@@ -6,6 +6,8 @@ Automated remediation is built and running: a Flask service takes Alertmanager's
 
 Injecting real faults into the running cluster then turned up a defect in that remediator — see [Chaos Engineering](#chaos-engineering) below.
 
+Production-grade here means the engineering practices, not production traffic: infrastructure as code, GitOps with self-heal, SLOs with burn-rate alerting, least-privilege RBAC, OIDC with no long-lived credentials, and a CVE gate that fails the build.
+
 ## Why "Railhead"
 
 A railhead is where a rail line physically ends and cargo transfers onward to its next mode of transport — that's the metaphor: code "arrives" from git here and gets carried into running infrastructure. It's also a nod to VxRail, the hyperconverged platform I've supported in production for years. The name sits at the intersection of both.
