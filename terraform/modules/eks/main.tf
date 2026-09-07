@@ -150,7 +150,7 @@ resource "aws_iam_role_policy_attachment" "node_cni" {
 # ---------------------------------------------------------------------------
 # Managed node group — 2x t3.large on-demand, AL2023. Sized for the VPC CNI's
 # pod-per-node ceiling, not CPU/memory: t3.medium caps out at 17 pods and
-# t3.large at 35. See docs/known-gotchas.md for how that ceiling surfaces.
+# t3.large at 35. See docs/known-gotchas.md #1 for how that ceiling surfaces.
 # ---------------------------------------------------------------------------
 
 resource "aws_eks_node_group" "this" {
@@ -561,13 +561,14 @@ resource "aws_cloudwatch_metric_alarm" "node_filesystem_high" {
 # in any configuration -- see docs/cloudwatch-logs-insights-queries.md.
 #
 # Honest framing: this is a growth-anomaly detector, not a capacity alarm.
-# EKS's etcd limit is 8 GB and this cluster sits at 27 MB, so a threshold
-# anchored to the real limit would never fire and would be decorative. 100 MB
-# is ~3.7x the observed baseline: above anything normal workload churn
+# EKS's etcd limit is 8 GB and this cluster sits at 27 MiB, so a threshold
+# anchored to the real limit would never fire and would be decorative.
+# 104,857,600 bytes (100 MiB) is ~3.7x the observed baseline: above anything normal workload churn
 # produces, low enough to catch a controller looping on object creation or a
 # runaway CRD long before etcd itself is under stress.
 #
-# Observed baseline: 28,270,592 bytes (27.0 MB), flat.
+# Observed baseline: 28,270,592 bytes (27.0 MiB; the console renders it as
+# 28.27 MB), flat.
 resource "aws_cloudwatch_metric_alarm" "apiserver_storage_growth" {
   alarm_name        = "${var.cluster_name}-apiserver-storage-growth"
   alarm_description = "etcd object storage exceeded 100 MB against a ~27 MB baseline. Indicates abnormal object accumulation, not capacity pressure -- the EKS limit is 8 GB."

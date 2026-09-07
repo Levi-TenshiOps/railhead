@@ -74,8 +74,9 @@ lower real traffic this alert does not fire at all**, and a pod serving nothing
 but errors goes unreported. Fix and full reasoning: gotcha #33.
 
 **Mechanism confirmed as predicted.** Every failing request took almost exactly
-5 seconds. Mean `/items` duration on the partitioned pod was **5.006s** for nine
-minutes straight; its healthy sibling served the same endpoint in **0.005s**.
+5 seconds. Mean `/items` duration on the partitioned pod was **5.006s** for thirteen
+minutes straight — 13:23 to 13:35, every sample between 5.0051 and 5.0103 —
+while its healthy sibling served the same endpoint in **0.005s**.
 That 5-second wall is `connect_timeout=5`.
 
 So the 5xx came from *new* connections timing out, not from the pooled one. The
@@ -132,7 +133,7 @@ procedure, no `/metrics` polling.
 half of it. Removing `/metrics` makes the ratio **independent of throughput**:
 with only `/items` in the denominator, a pod failing every request reads 1.0 no
 matter how far its throughput has collapsed. The old rule spent nine minutes
-straddling 0.5; the new rule passed through that value at ~3m30s on the way up
+straddling 0.5 before it finally held; the new rule passed through that value at ~3m30s on the way up
 and kept going.
 
 Measured on the target pod before injection: `/metrics` was a **fixed 0.03333/s**
@@ -181,9 +182,9 @@ quarantined 300s apart, zero refusals.**
 
 The 300s gap is exactly Alertmanager's `group_interval: 5m`.
 
-**The self-erasing evidence loop.** Quarantining a pod drops it from the Service;
-the ServiceMonitor scrapes *through* the Service, so Prometheus stops scraping it
-and its alert resolves. When the second pod fires, it genuinely is the only
+**The self-erasing evidence loop.** Quarantining a pod drops it from the Service's
+EndpointSlice, which is where the ServiceMonitor's targets come from, so Prometheus
+stops scraping it and its alert resolves. When the second pod fires, it genuinely is the only
 firing pod — the remediator's own action destroyed the evidence its guard reads.
 Two conditions combined: `for: 2m` timers desynchronised by 65s, and the guard
 counts only `status == "firing"`, so webhook 2 contained both pods but scored

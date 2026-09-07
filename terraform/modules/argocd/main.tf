@@ -409,7 +409,8 @@ resource "kubernetes_manifest" "observability_application" {
             # apply to both SLOs below; only the window sizes and the
             # error-budget fraction (1 - SLO target) differ per SLO.
             #
-            # Every expression below excludes handler=~"/health|/metrics".
+            # Every expression below excludes /health and /metrics via
+            # handler!~"/health|/metrics".
             # Neither is user traffic, and both dilute the denominator in the
             # direction that hides problems. Note the operator: !~ not !=,
             # because the exclusion is now an alternation. Prometheus anchors

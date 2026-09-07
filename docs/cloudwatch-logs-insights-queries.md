@@ -20,7 +20,7 @@ Two log groups, both Terraform-managed with 1-day retention:
 
 Three alarms, none with a notification action — Alertmanager owns routing:
 `remediator-down`, `node-filesystem-high` (80%), `apiserver-storage-growth`
-(100 MB).
+(104,857,600 bytes = 100 MiB, against a 27 MiB baseline).
 
 ## Why the audit log matters
 

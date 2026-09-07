@@ -4,6 +4,22 @@
 # for both, Alertmanager groups them into one payload, and the remediator
 # REFUSES to quarantine on its multi_pod guard. The refusal is the result.
 #
+# ---------------------------------------------------------------------------
+# MEASURED 2026-09-04: IT DID NOT. The prediction above is left exactly as it
+# was written before the run, because a prediction quietly revised after the
+# fact is worth nothing.
+#
+# What actually happened: both api pods were quarantined 300s apart with ZERO
+# refusals. Alertmanager's grouping worked correctly -- the pods' `for: 2m`
+# timers desynchronised by 65s, so they arrived in SEPARATE payloads one
+# group_interval apart, and quarantining the first dropped it out of the
+# Service, which stopped Prometheus scraping it and RESOLVED its alert. Each
+# notification therefore looked like a lone failure.
+#
+# Results: docs/week7-chaos-scorecard.md section 2. Mechanism:
+# docs/known-gotchas.md #32.
+# ---------------------------------------------------------------------------
+#
 # This is a shared-dependency outage, not a bad pod -- quarantining anything
 # here would be wrong, because every replacement pod would be equally broken.
 #

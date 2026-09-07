@@ -140,11 +140,14 @@ refresh drops them. **Measured on 2026-08-31: that is false.** The plan showed
 not move. The old 51 simply predates the CloudWatch feature's 7 resources and
 chaos-mesh's 2. Deleting namespaces by hand does not change what Terraform
 destroys, because those resources are still in state and Terraform removes them
-either way. Not sequentially — the cluster's API
-endpoint is public-only, so node-to-control-plane traffic routes out through the
-NAT Gateway and back in, a dependency Terraform's graph cannot see. Destroying the
-VPC first drops the nodes mid-teardown and hangs anything waiting on the
-Kubernetes API. Quote the `-target` arguments; unquoted, PowerShell splits them
+either way.
+
+**Why both modules go in one command, and not one after the other.** The
+cluster's API endpoint is public-only, so node-to-control-plane traffic routes
+out through the NAT Gateway and back in — a dependency Terraform's graph cannot
+see. Destroying the VPC first drops the nodes mid-teardown and hangs anything
+waiting on the Kubernetes API. Naming both targets in a single destroy lets
+Terraform order them itself. Quote the `-target` arguments; unquoted, PowerShell splits them
 and Terraform rejects the command with `Invalid target "module"`.
 
 **A partial failure is expected and recoverable.** Destroy is resumable — if it

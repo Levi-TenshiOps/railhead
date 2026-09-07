@@ -348,7 +348,7 @@ Same family as #20 — a shell mangling arguments to a native command — but a 
 
 **What happened here.** `railhead-remediator` refuses to quarantine when several pods alert at once, because a shared dependency failing is not one bad pod. A Week 7 experiment took Postgres away from both `railhead-api` replicas and the guard **never engaged**: both pods quarantined, zero refusals (measurements in `week7-chaos-scorecard.md`).
 
-**Why.** Quarantining pod A rewrites its `app` label, dropping it from the Service. The ServiceMonitor scrapes *through* the Service, so Prometheus stops scraping A, its series goes stale, and **A's alert resolves**. When B fires, B genuinely is the only firing pod.
+**Why.** Quarantining pod A rewrites its `app` label, dropping it from the Service's EndpointSlice. A ServiceMonitor selects a *Service* and Prometheus then scrapes the pod IPs behind it, so losing EndpointSlice membership removes A from the scrape list entirely: Prometheus stops scraping A, its series goes stale, and **A's alert resolves**. When B fires, B genuinely is the only firing pod.
 
 Two conditions combined, and the guard needed only one:
 
