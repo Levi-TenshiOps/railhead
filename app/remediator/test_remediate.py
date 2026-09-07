@@ -130,3 +130,83 @@ def test_one_failing_alert_does_not_sink_the_rest_of_the_payload(patched):
 
     # First alert raised and was swallowed; the second still quarantined.
     core.patch_namespaced_pod.assert_called_once()
+def test_multi_pod_is_derived_from_a_payload_holding_both_pods(patched):
+    """The synthetic case, at the HTTP layer rather than by hand.
+
+    `test_refuses_when_multiple_pods_are_alerting` above passes `multi_pod`
+    in as a parameter, so it never exercises the code that computes it. This
+    one posts a real payload to /webhook and lets `webhook()` derive it. It
+    passes -- which is exactly what the synthetic guard test proved, and
+    exactly what turned out not to matter. See the next test.
+    """
+    core, _, messages = patched
+    other = {
+        "status": "firing",
+        "labels": {"alertname": "RailheadAPIPodErrorRate", "pod": "railhead-api-def456"},
+    }
+
+    with remediate.app.test_request_context("/webhook", json={"alerts": [ALERT, other]}):
+        remediate.webhook()
+
+    core.patch_namespaced_pod.assert_not_called()
+    assert all("multiple pods are alerting" in m for m in messages)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the multi_pod guard does not engage against real Alertmanager "
+           "sequencing; see docs/known-gotchas.md #32",
+)
+def test_real_alertmanager_sequencing_defeats_the_multi_pod_guard(patched):
+    """THIS TEST FAILS ON PURPOSE. It asserts the behaviour the guard is
+    supposed to have, against the payloads Alertmanager actually sends.
+
+    The test above passes because a hand-written payload carries both pods at
+    once. Real Alertmanager never sends that payload during a shared outage.
+    Week 7 measured what it sends instead:
+
+      1. The two pods' `for: 2m` timers desynchronise (65s apart measured), so
+         the first notification carries ONE firing pod. multi_pod is correctly
+         False and pod A is quarantined.
+      2. Quarantining A rewrites its `app` label, dropping it from the Service.
+         The ServiceMonitor scrapes through the Service, so Prometheus stops
+         scraping A and A's alert RESOLVES.
+      3. One `group_interval` later (300s measured) the second notification
+         arrives carrying A as *resolved* and B as *firing*. `webhook()` counts
+         only firing alerts, so multi_pod is False again and B is quarantined
+         too.
+
+    Measured result: both api pods quarantined 300s apart, zero refusals,
+    during exactly the shared-dependency outage the guard exists to prevent.
+
+    Kept as an xfail rather than deleted or "fixed" because the measured
+    behaviour is the artifact of this project. `strict=True` means this starts
+    FAILING the build the day the guard is repaired, which is the point: the
+    fix and this write-up cannot drift apart silently. The recommended repair
+    is to count pods recently ACTED ON rather than pods currently FIRING,
+    reusing the 15-minute history `sweep_and_count()` already keeps.
+    """
+    core, _, _ = patched
+    pod_a = "railhead-api-abc123"
+    pod_b = "railhead-api-def456"
+    core.read_namespaced_pod.side_effect = lambda name, ns, **kw: make_pod(name=name)
+
+    def alert(pod, status):
+        return {
+            "status": status,
+            "labels": {"alertname": "RailheadAPIPodErrorRate", "pod": pod},
+        }
+
+    # Notification 1: only A has crossed its `for: 2m` timer.
+    with remediate.app.test_request_context("/webhook", json={"alerts": [alert(pod_a, "firing")]}):
+        remediate.webhook()
+
+    # Notification 2, one group_interval later: A has resolved because
+    # quarantining it took it out of the Service and out of Prometheus.
+    with remediate.app.test_request_context(
+        "/webhook", json={"alerts": [alert(pod_a, "resolved"), alert(pod_b, "firing")]}
+    ):
+        remediate.webhook()
+
+    # What the guard is supposed to do: quarantine A, then refuse on B.
+    core.patch_namespaced_pod.assert_called_once()

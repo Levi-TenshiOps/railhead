@@ -24,9 +24,9 @@ Two paths lead into the cluster and they never cross: container images travel th
 - **VPC** ([`terraform/modules/vpc`](terraform/modules/vpc)): 2 public + 2 private subnets across 2 AZs, one NAT Gateway shared by both private subnets — a deliberate cost tradeoff for dev (production would run one per AZ). Subnets are pre-tagged for EKS/load-balancer discovery.
 - **GitHub Actions OIDC** ([`terraform/modules/iam`](terraform/modules/iam)): CI authenticates to AWS with short-lived OIDC tokens instead of long-lived keys sitting in GitHub Secrets.
 - **ECR** ([`terraform/modules/ecr`](terraform/modules/ecr)): immutable image tags, vulnerability scanning on push, and a lifecycle policy so image storage doesn't grow forever.
-- **CI pipeline** (`.github/workflows/ci.yml`): every push to `main` and every pull request against it builds all three service images (`api`, `worker`, `remediator`) and scans them with Trivy. Any HIGH or CRITICAL vulnerability with a fix available fails the build. Unfixed CVEs are excluded on purpose (`ignore-unfixed: true`) — gating on vulnerabilities that have no upstream patch yet just trains people to bypass the gate instead of fixing anything. AWS credentials are only issued on pushes to `main`, never on a PR run, so a malicious PR can't steal real credentials even if it tried. Bumping the deployed image tag is a manual commit rather than an automated CI step — a deliberate choice to avoid the added complexity of giving CI write access to the repo, and to keep a human in the loop before any new image actually goes live.
+- **CI pipeline** (`.github/workflows/ci.yml`): every push to `main` and every pull request against it builds all three service images (`api`, `worker`, `remediator`) and scans them with Trivy. Any HIGH or CRITICAL vulnerability with a fix available fails the build. Unfixed CVEs are excluded on purpose (`ignore-unfixed: true`) — gating on vulnerabilities that have no upstream patch yet just trains people to bypass the gate instead of fixing anything. AWS credentials are only issued on pushes to `main`, never on a PR run, so a malicious PR can't steal real credentials even if it tried. Bumping the deployed image tag is a manual commit, not an automated CI step. That is a deliberate choice to avoid the added complexity of giving CI write access to the repo, and to keep a human in the loop before any new image actually goes live.
 - **EKS** ([`terraform/modules/eks`](terraform/modules/eks)): a managed control plane, a 2x t3.large node group (sized for the pod-per-node ceiling — see [Known Gotchas](docs/known-gotchas.md)), and core add-ons (VPC CNI, CoreDNS, kube-proxy, EBS CSI) all through Terraform. EBS CSI runs on IAM Roles for Service Accounts (IRSA) alone; VPC CNI needs a node-level policy to bootstrap before its own IRSA role takes over.
-- **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a small FastAPI service backed by Postgres, plus a worker that exercises the API on a loop. On first install, the API briefly crash-loops while Postgres is still starting — nothing waits for DB readiness yet — then self-recovers within about a minute — though one rebuild produced no restarts at all, so the race may be less deterministic than documented. Known, not hidden; an `initContainer` is the obvious fix, just not built.
+- **Sample app** (`app/`, `kubernetes/helm-charts/railhead-app`): a small FastAPI service backed by Postgres, plus a worker that exercises the API on a loop. On first install the API briefly crash-loops while Postgres is still starting (nothing waits for DB readiness yet), then self-recovers within about a minute — though one rebuild produced no restarts at all, so the race may be less deterministic than documented. Known, not hidden; an `initContainer` is the obvious fix, just not built.
 - **GitOps** ([`terraform/modules/argocd`](terraform/modules/argocd)): ArgoCD deploys the app from a git-tracked `Application`, with `selfHeal` and `prune` on — no one runs `helm install` by hand anymore. Proven, not just configured: scaling the API to 0 by hand was reverted back to 2 replicas in about a second, with zero human involvement.
 - **Metrics** (`terraform/modules/argocd`, kube-prometheus-stack): Prometheus and Grafana, deployed as their own ArgoCD Application. The API exposes `/metrics` via `prometheus-fastapi-instrumentator`. Dashboards are code — JSON committed to the repo, auto-loaded by Grafana's sidecar — so wiping the Grafana PVC doesn't lose them.
 - **Logs** (`terraform/modules/argocd`, Loki + Grafana Alloy): Loki aggregates logs cluster-wide (S3-backed, 7-day retention), shipped by Alloy as a DaemonSet. Alloy over the older Promtail specifically because Promtail hit end-of-life in March 2026. Grafana picks up Loki the same way it picks up dashboards — a labeled ConfigMap.
@@ -39,6 +39,28 @@ Two paths lead into the cluster and they never cross: container images travel th
 Built and torn down incrementally, not left running. The expensive resources — EKS control plane, node group, NAT Gateway — come down at the end of every session and go back up at the start of the next. **Neither direction is a single command.** Teardown is a six-step documented sequence: the ArgoCD Applications and then the namespaces they deployed into must be deleted by hand *before* Terraform runs, because deleting an Application does not delete what it created — skip that and the EBS volumes orphan and bill indefinitely. Only step 5 is a `terraform destroy`. The rebuild is longer still: three targeted passes plus a manual CRD bootstrap, because a single apply can't sequence ArgoCD's CRDs ahead of the resources that require them. Both are written up step by step, with expected output and a ten-check orphan sweep: [teardown](docs/teardown-sequence.md), [rebuild](docs/rebuild-sequence.md). Together they run about $0.31/hour at list price, so a working session costs roughly a dollar instead of the ~$227/month they'd cost left running.
 
 What persists between sessions is deliberately the cheap half: the S3/DynamoDB state backend, the IAM roles, the ECR repositories, and the S3 bucket holding Loki's log chunks. That's well under $1/month in total, almost all of it ECR image storage — worth paying so nothing has to be rebuilt from scratch. A $50/month budget alarm and a zero-spend alert back the whole thing up. Both live at the account level rather than in this repo's Terraform — deliberately, so that tearing down the workload can never take the spend guardrails down with it.
+
+## Running it yourself
+
+**Prerequisites.** An AWS account you are willing to spend about **$0.31/hour** in, the AWS CLI authenticated against it, Terraform, `kubectl`, and `helm`. Two secrets: a fine-grained GitHub PAT and a Slack incoming-webhook URL. Commands are PowerShell — the sequence docs assume it, and several gotchas here are PowerShell-specific.
+
+**Fork first, then repoint the hard-coded values.** The state bucket name in `terraform/environments/dev/backend.tf`, the ECR registry in both `kubernetes/helm-charts/*/values.yaml`, the CI role ARN in `.github/workflows/ci.yml`, and `github_repo_url` in `terraform/modules/argocd/variables.tf` all name one specific account and repo.
+
+```powershell
+# 1. State backend - once per account. Manages its own state locally,
+#    because it is the thing creating the backend everything else uses.
+Copy-Item terraform/bootstrap/terraform.tfvars.example terraform/bootstrap/terraform.tfvars
+terraform -chdir=terraform/bootstrap init
+terraform -chdir=terraform/bootstrap apply
+
+# 2. Supply the two secrets for the dev environment.
+Copy-Item terraform/environments/dev/terraform.tfvars.example terraform/environments/dev/terraform.tfvars
+terraform -chdir=terraform/environments/dev init
+```
+
+**Then follow [`docs/rebuild-sequence.md`](docs/rebuild-sequence.md) rather than running a bare `terraform apply`.** It is three targeted passes plus a manual CRD bootstrap, roughly 20 minutes, with the expected output at every step. A single apply cannot complete from a destroyed state: the ArgoCD `Application` resources cannot be planned until ArgoCD's own CRDs exist, and the same apply is what installs them ([#12](docs/known-gotchas.md#12)).
+
+**When you are done, follow [`docs/teardown-sequence.md`](docs/teardown-sequence.md) in order.** Step order is load-bearing. Deleting an ArgoCD `Application` does not delete what it deployed, so skipping the namespace deletion in step 2 orphans EBS volumes that bill indefinitely ([#7](docs/known-gotchas.md#7)).
 
 ## Automated Remediation
 
@@ -92,7 +114,7 @@ Two scenarios were chosen to test the remediator in both directions, because a r
 
 The remediator handled a fault it was never tuned for. It identified the partitioned pod, quarantined it **12s** after the alert fired on the first run (30s on the re-run below), and had a replacement serving traffic **~30s** later, leaving the broken pod running for inspection; the sibling never alerted. Mean `/items` latency on the partitioned pod held at **5.006s** for nine consecutive minutes against **0.005s** on its healthy sibling — pinning the failures to `connect_timeout=5`, and confirming the 5xx came from failed *new* connections rather than the pooled one.
 
-The find was in the alert beneath it. `/metrics` sat in the denominator at **~45%**, holding the error ratio oscillating **0.438–0.550** across a 0.5 threshold with a ceiling of **~0.51** — a **2% margin** — and one PENDING period was **abandoned** mid-count. Detection took **13m52s**; on a shorter fault it would not have fired at all.
+The find was in the alert beneath it. `/metrics` held **45–56%** of the denominator through the fault. With every `/items` request failing, the ratio was simply *one minus that share* — it ranged **0.438–0.550** with a **median of exactly 0.500**, sitting on the threshold rather than above it, and one PENDING period was **abandoned** mid-count. Detection took **13m52s**; on a shorter fault it would not have fired at all.
 
 Excluding `/metrics` from all five rules and re-running the same scenario: **5m46s**, no abandoned PENDING, ratio pinned at **1.0**. `/metrics` is scraped on a fixed interval while `/items` throughput collapses under fault, so the scrape share rises exactly when the alert needs it lowest. Find, fix, re-measure — the loop the exercise exists to run.
 
@@ -104,7 +126,7 @@ Both api pods were quarantined **300s apart** with **zero refusals**, during the
 
 ### Check 3 — a blind spot in the monitoring itself
 
-Ten minutes with the remediator `0/1` Ready, zero endpoints, `CrashLoopBackOff`, **8 restarts** — and the CloudWatch alarm never left `OK`, because `service_number_of_running_pods` counts pod **phase, not readiness**, and reported **`1.0` every minute**. Detail and the fix tradeoff: [AWS-native monitoring](#aws-native-monitoring) below.
+Ten minutes with the remediator `0/1` Ready, zero endpoints and `CrashLoopBackOff` — and the CloudWatch alarm watching it never left `OK`. Why, and what it means for the alarm's design: [AWS-native monitoring](#aws-native-monitoring) below.
 
 **One analysis correction, recorded.** The burn-rate SLO alerts were predicted to need 45 min – 2 h; they fired in **8 minutes**. The prediction used the *latency* SLO's threshold (0.72) instead of *availability*'s (0.144), and assumed a 6-hour `rate()` window holds six hours of history — false on a cluster rebuilt 12 minutes earlier.
 
@@ -118,13 +140,13 @@ Full numbers: [`docs/week7-chaos-scorecard.md`](docs/week7-chaos-scorecard.md). 
 
 CloudWatch Container Insights runs alongside Prometheus and Grafana rather than replacing them. Two monitoring systems only earn their keep if they see different things — these do.
 
-**What only CloudWatch can see.** AWS operates the control plane. The API server itself is scrapable — this cluster scrapes it — but `kube-scheduler`, `kube-controller-manager`, and etcd are not, which is why those scrape jobs are disabled rather than left permanently down. The audit log is out of reach entirely: Prometheus collects metrics, not a per-request record of which ServiceAccount called what. That record is what makes RBAC checkable from outside the cluster instead of taken on trust.
+**What only CloudWatch can see.** AWS operates the control plane. The API server itself is scrapable — this cluster scrapes it — but `kube-scheduler`, `kube-controller-manager`, and etcd are not, which is why those scrape jobs are disabled instead of sitting permanently down. The audit log is out of reach entirely: Prometheus collects metrics, not a per-request record of which ServiceAccount called what. That record is what makes RBAC checkable from outside the cluster instead of taken on trust.
 
 **Watching the watcher — and the half of it that doesn't work.** The remediator watches `railhead-api`, and nothing watched the remediator: a real gap, since it runs a single replica and a single replica that dies stays dead. Prometheus can't close it — Prometheus and Alertmanager run in the same cluster and can't reliably alert on a failure that takes them down too. A CloudWatch alarm sits outside the cluster and survives what it reports on. That reasoning still holds and is why the alarm lives in CloudWatch.
 
 **The alarm as built closes only half the gap, and chaos testing is what revealed it.** Holding the remediator down for ten minutes left it `0/1` Ready, zero endpoints, `CrashLoopBackOff`, 8 restarts — and the alarm never left `OK`, because `service_number_of_running_pods` counts pods in the **`Running` phase**, not ready ones. It reported `1.0` every minute while the pod was running and useless.
 
-So the alarm detects a remediator that is **gone**, not one **running but broken** — which is how it actually fails: crashloop, deadlock, hung server. Reading the Terraform would never have shown this. `treat_missing_data = "breaching"` remains correct for the case it does cover: a pod that disappears stops publishing rather than reporting zero, and the CloudWatch default would stay silent for exactly that failure.
+So the alarm detects a remediator that is **gone**, not one **running but broken** — which is how it actually fails: crashloop, deadlock, hung server. Reading the Terraform would never have shown this. `treat_missing_data = "breaching"` remains correct for the case it does cover: a pod that disappears stops publishing anything at all, so no datapoint arrives to compare; and the CloudWatch default would stay silent for exactly that failure.
 
 The honest fix is an external synthetic probe against `/healthz`, keeping the independence that motivated CloudWatch. A readiness-derived Prometheus metric would be accurate but reintroduces the in-cluster dependency the alarm exists to avoid. **Recommended, not implemented** — see gotcha #34.
 
@@ -136,11 +158,18 @@ Reusable Logs Insights queries, with captured output, are in [`docs/cloudwatch-l
 
 ## Known gotchas
 
-Real problems hit while building this, kept in [`docs/known-gotchas.md`](docs/known-gotchas.md) rather than quietly fixed and forgotten.
+**38 entries**, in [`docs/known-gotchas.md`](docs/known-gotchas.md) — real problems hit while building this, written down and kept. Append-only and numbered permanently, because the sequence docs cross-reference them and those references would rot silently otherwise. Several are load-bearing operational knowledge:
+
+- [#7](docs/known-gotchas.md#7) — deleting an ArgoCD `Application` does **not** delete what it deployed. Skip the namespace deletion at teardown and the EBS volumes orphan and bill indefinitely.
+- [#25](docs/known-gotchas.md#25) — a CloudWatch log group EKS creates for itself outlived `terraform destroy` and reached **1.51 GB**, invisible across three teardowns that were each verified clean. A procedure only verifies what it checks for.
+- [#29](docs/known-gotchas.md#29) — Chaos Mesh generates its admission-webhook certificate at Helm *render* time, so ArgoCD re-renders a fresh one on every sync and TLS breaks. This is why one component is deployed by Terraform instead.
+- [#32](docs/known-gotchas.md#32) — the guard failure above, and the more uncomfortable half: how far a wrong claim about a safety control travelled before it was caught, and in what order.
+- [#36](docs/known-gotchas.md#36) — two published figures were wrong because they were read off a rendered UI instead of queried. If a number goes into a document, query the source.
+- [#38](docs/known-gotchas.md#38) — `$ErrorActionPreference` does not stop a failing native command in PowerShell 5.1, so a script that applied every other gotcha in this file still reported a failed injection as a successful one.
 
 ## Screenshots
 
-I wanted actual proof here, not just claims — so this folder has real `terraform apply`/`destroy` output, AWS Console views, `kubectl`/ArgoCD/Grafana output, and Slack alerts, organized by component under `screenshots/`. I only capture things that don't already have a permanent record somewhere else. **The six below are a preview**; each also appears in its topic gallery underneath, alongside everything else.
+I wanted actual proof here, so this folder has real `terraform apply`/`destroy` output, AWS Console views, `kubectl`/ArgoCD/Grafana output, and Slack alerts, organized by component under `screenshots/`. I only capture things that don't already have a permanent record somewhere else. **The six below are a preview**; each also appears in its topic gallery underneath, alongside everything else.
 
 The `railhead` Application's full resource tree in ArgoCD — Secret, Services, ServiceAccount, Deployment, ReplicaSet, pods, StatefulSet, PVC, NetworkPolicy, PodDisruptionBudget and StorageClass, every one green. This is what "deployed by GitOps" actually looks like:
 ![ArgoCD resource tree for the railhead Application, all resources healthy and synced](screenshots/argocd-synced.png)
@@ -224,7 +253,7 @@ Worker logs, alternating `GET`/`POST` calls against the API on a fixed interval:
 Full resource tree for the `railhead` Application (API, worker, Postgres StatefulSet, and their supporting resources) — *also shown above*:
 ![ArgoCD resource tree for the railhead Application](screenshots/argocd-synced.png)
 
-Resource tree with the observability Application `Progressing` and its surge pod `Pending` behind eight ReplicaSet revisions — the signature of the rollout deadlock in [Known Gotchas](docs/known-gotchas.md) #2. The debugging process itself, not just the clean end state. *Also shown above*:
+Resource tree with the observability Application `Progressing` and its surge pod `Pending` behind eight ReplicaSet revisions — the signature of the rollout deadlock in [Known Gotchas](docs/known-gotchas.md) #2. The debugging process itself, which is the half most portfolios leave out. *Also shown above*:
 ![ArgoCD resource tree with the observability app stuck Progressing, a Pending Grafana pod behind eight ReplicaSet revisions](screenshots/argocd-debug-resource-tree.png)
 
 Self-heal proof: manually scaling the API to 0 via `kubectl` (bypassing git entirely) was detected and reverted back to 2 replicas by ArgoCD, with zero human intervention:
@@ -247,7 +276,7 @@ Custom `Railhead — Cluster Health` dashboard (node CPU/memory, pod count by na
 Dashboard-persistence proof, part 1: a fresh Grafana pod (age 15m, 0 restarts) after a PVC reset that would have wiped any manually-created dashboard:
 ![Fresh Grafana pod after a PVC reset](screenshots/grafana-dashboards-fresh-pod.png)
 
-Dashboard-persistence proof, part 2: both custom dashboards still present — re-provisioned automatically from the labeled ConfigMaps rather than lost with the old PVC:
+Dashboard-persistence proof, part 2: both custom dashboards still present — re-provisioned automatically from the labeled ConfigMaps after the old PVC went away:
 ![Custom dashboards still present after the PVC reset](screenshots/grafana-dashboards-persisted.png)
 
 </details>
@@ -332,7 +361,7 @@ Both log groups at 1-day retention — the fix for never-expiring groups outlivi
 `apiserver_storage_size_bytes` graphed — etcd object storage, flat at 28.27 MB as the console renders it, which is 27.0 MiB: the baseline the alarm's 100 MB threshold is set against:
 ![CloudWatch metrics graph of apiserver_storage_size_bytes](screenshots/cloudwatch-apiserver-storage.png)
 
-Least-privilege, checked from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments — and over a three-hour window the audit log shows exactly one was exercised: `list pods`, twice, in `railhead` — no actionable alert fired in that period. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
+Least-privilege, checked from outside the cluster. The remediator's `Role` grants six verb/resource combinations — `get`/`list`/`patch`/`delete` on pods, `get` on `pods/log`, `get` on deployments. Over a three-hour window the audit log shows exactly one was exercised: `list pods`, twice, in `railhead`, because no actionable alert fired in that period. It's namespaced rather than a `ClusterRole`, so `kube-system` and `argocd` are out of reach, and it grants no `create`, no `watch`, no `pods/exec`, and nothing for secrets, configmaps, nodes, or RBAC:
 ![Logs Insights query showing the remediator ServiceAccount made only list-pods calls](screenshots/cloudwatch-logs-insights-least-privilege.png)
 
 Top API-server callers over a 3-hour window. `kube-scheduler` and `kube-controller-manager` appear with thousands of calls each, and neither is scraped by Prometheus here — AWS exposes no metrics endpoint for them. *Also shown above*:

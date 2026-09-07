@@ -52,7 +52,7 @@ Service name is `observability-kube-prometh-prometheus` — Helm truncates it.
 
 > **Do not poll the pod's `/metrics` to check progress.** Query Prometheus
 > instead. This was load-bearing on the first run, when `/metrics` sat in the
-> alert denominator with a 2% margin (gotcha #33) and every read pushed the ratio
+> alert denominator, holding the ratio on the threshold (gotcha #33), and every read pushed it
 > further down — you could suppress the alert by observing it. The rules now
 > exclude `/metrics`, so the hazard is gone, but the habit is still right: the
 > pod's own counters are not the signal the alert reads.

@@ -429,9 +429,11 @@ resource "kubernetes_manifest" "observability_application" {
             # scrapes it on a fixed interval, but /items throughput collapses
             # under fault -- each failed request blocks 5s on connect_timeout
             # -- so the scrape share rises exactly when the alert needs it
-            # lowest. That held the per-pod error ratio oscillating 0.438-0.550
-            # against a 0.5 threshold: a 2% margin, one abandoned PENDING, and
-            # 13m52s to fire. On a shorter fault it would not have fired at
+            # lowest. With every /items request failing, the ratio reduces to
+            # one minus the /metrics share -- so it tracked that share instead
+            # of the fault, ranging 0.438-0.550 with a median of exactly 0.500
+            # against a > 0.5 threshold. One abandoned PENDING, and 13m52s to
+            # fire. On a shorter fault it would not have fired at
             # all. Measured, not theorised: docs/week7-chaos-scorecard.md.
             additionalPrometheusRulesMap = {
               "railhead-api-slo-burn-rate" = {
@@ -629,10 +631,17 @@ resource "kubernetes_manifest" "observability_application" {
               }
             }
 
-            # These control-plane components aren't scrapable on EKS (AWS
-            # manages them, no access to their metrics endpoints) — leaving
-            # them enabled would just create permanently-"down" targets in
-            # Prometheus with nothing actionable about them.
+            # The first three are genuinely unreachable on managed EKS: AWS
+            # operates them and exposes no metrics endpoint, so leaving them
+            # enabled would just create permanently-"down" targets with nothing
+            # actionable about them. (The API server itself IS scrapable and is
+            # left enabled — only these three are out of reach.)
+            #
+            # kubeProxy is a different case and is disabled for a different
+            # reason. It runs as a DaemonSet on OUR nodes, not in the AWS
+            # control plane, and its metrics endpoint is reachable
+            # (metricsBindAddress 0.0.0.0:10249). It is switched off because
+            # nothing here alerts on it, not because it cannot be scraped.
             kubeControllerManager = { enabled = false }
             kubeScheduler         = { enabled = false }
             kubeEtcd              = { enabled = false }

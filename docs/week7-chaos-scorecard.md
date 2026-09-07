@@ -59,10 +59,15 @@ pod name, `duration: 15m`. *Analogue: one replica isolated from its database.*
 **The alert nearly didn't fire.** `/metrics` is instrumented and at the time the
 rule excluded only `handler!="/health"`, so scrape traffic was **~45% of the
 denominator**:
-`/items` 5xx 0.0185/s, `/items` 2xx 0.0407/s, **`/metrics` 2xx 0.0482/s**. With
-every `/items` request failing the ceiling is `0.05 / 0.098 ≈ 0.51` against a 0.5
-threshold — a **2% margin**. The ratio oscillated **0.438–0.550**, so the first
-PENDING was abandoned mid-count.
+`/items` 5xx 0.0185/s, `/items` 2xx 0.0407/s, **`/metrics` 2xx 0.0482/s**.
+
+Once every `/items` request was failing, the arithmetic collapsed to something
+simple: the numerator *is* the whole `/items` rate, so the ratio equals **one
+minus the `/metrics` share** at every scrape. `/metrics` moved between **45.0%
+and 56.3%** of the denominator across the fault, so the ratio moved between
+**0.438 and 0.550** — median **exactly 0.500**, mean 0.502 — against a `> 0.5`
+threshold. It was not a narrow margin above the line; it sat *on* the line and
+crossed back and forth, which is why the first PENDING was abandoned mid-count.
 
 The delay is not the problem: **on a shorter fault, a tighter scrape interval, or
 lower real traffic this alert does not fire at all**, and a pod serving nothing
@@ -113,7 +118,7 @@ procedure, no `/metrics` polling.
 | FIRING | **13m52s** | **5m46s** |
 | Quarantine | 12s after FIRING | 30s after FIRING |
 | Ratio behaviour | oscillated 0.438–0.550 | climbed monotonically to **1.0000** |
-| Margin over the 0.5 threshold | **2%** | **100%** |
+| Ratio vs the 0.5 threshold | median **0.500** — on the line | **1.000** — double it |
 
 ```
 13:56:56  inject
@@ -126,8 +131,9 @@ procedure, no `/metrics` polling.
 **Detection went from 13m52s to 5m46s — 8m06s faster.** The speed is the smaller
 half of it. Removing `/metrics` makes the ratio **independent of throughput**:
 with only `/items` in the denominator, a pod failing every request reads 1.0 no
-matter how far its throughput has collapsed. The old rule's *ceiling* of 0.5102 is
-roughly the value the new rule merely passes through at ~3m30s on the way up.
+matter how far its throughput has collapsed. The old rule spent nine minutes
+straddling 0.5; the new rule passed through that value at ~3m30s on the way up
+and kept going.
 
 Measured on the target pod before injection: `/metrics` was a **fixed 0.03333/s**
 — one scrape per 30s, identical on both pods, independent of load — against
