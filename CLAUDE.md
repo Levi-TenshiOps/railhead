@@ -97,5 +97,9 @@ Concretely:
   single-threaded. Adding `pod` to `group_by` would break that.
 - ArgoCD Applications carry no cascade finalizer — considered and
   rejected (known-gotchas #7).
-- Image tags are bumped by hand and CI has no path filtering, so all
-  three images rebuild on every push. Both are documented debt.
+- Image tags are bumped by hand — deliberate, so a human stays in the
+  loop before a new image goes live. Documented debt.
+- CI is path-filtered to `app/**` and the workflow file itself. It was
+  not, and rebuilding all three images on documentation commits grew ECR
+  to 178 images and pushed the deployed tags toward eviction by the
+  100-image lifecycle cap (known-gotchas #39).

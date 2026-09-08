@@ -1,10 +1,22 @@
 name: CI
 
+# Path-filtered deliberately. Without it every commit -- including
+# documentation-only ones -- rebuilt all three images and pushed three new
+# tags, which grew ECR to 178 images / 3.027 GB and, more importantly, walked
+# the deployed tags toward eviction by the 100-image lifecycle cap
+# (known-gotchas.md #4, #39). The workflow file itself is included so a change
+# to the pipeline still exercises the pipeline.
 on:
   push:
     branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/ci.yml'
 
 permissions:
   id-token: write

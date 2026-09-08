@@ -47,6 +47,7 @@ end and keep their number permanently, even once a later entry supersedes them.
 36. [A number read off a rendered UI is not a measurement](#36)
 37. [A Helm chart can ship an empty `ClusterRole` and run perfectly](#37)
 38. [`$ErrorActionPreference` does not stop a failing native command](#38)
+39. [Non-reproducible builds turn image retention into a storage problem](#39)
 
 ---
 
@@ -449,3 +450,33 @@ The two failure shapes it produced:
 That second one is the more dangerous shape: not silence, but a **confident, specific, wrong** diagnosis.
 
 This is the "reports healthy and silently does nothing" pattern (#24) reappearing inside a script, and it defeats the same reflex #30 names — reading the status line instead of testing the behaviour. Knowing every documented trap in a language is not the same as knowing how that language reports failure.
+
+<a id="39"></a>
+### 39. Non-reproducible builds turn image retention into a storage problem
+
+Three ECR repositories built from three Dockerfiles held **178 images occupying 3.027 GB**. Layer sharing should have made that roughly **150 MB** — one copy of the base image plus a few megabytes of application code per build. It did not, and the gap is a factor of twenty.
+
+Measured from the image manifests rather than by summing `imageSizeInBytes`, which double-counts shared layers and overestimated this by 4.5x on the first attempt. `railhead-api` held **324 unique layers across 63 images**. If layers were shared the way the mental model assumes, sixty-three nine-layer images would resolve to ten or fifteen unique layers.
+
+Diffing three consecutive builds shows exactly which layers move:
+
+```
+L0  29.37 MB   shared by all three   L1   4.07 MB   shared by all three    |  python:3.12-slim, 45 MB
+L2  11.56 MB   shared by all three    |
+L3   0.00 MB   shared by all three   /
+L4   0.00 MB   different every build
+L5   0.00 MB   different every build
+L6  19.75 MB   DIFFERENT EVERY BUILD  <-- COPY --from=builder /opt/venv
+L7   0.00 MB   different every build
+L8   0.00 MB   different every build
+```
+
+**Only the 45 MB base image is shared. Everything the Dockerfile adds is unique per build**, and it is dominated by a single 19.75 MB layer.
+
+**Why.** `pip install` runs fresh in the builder stage on every CI run. Docker layers capture file mtimes, so `/opt/venv` is written with new timestamps each time — and a layer digest is the hash of its tar, not of its logical contents. **Identical package content therefore produces a different layer digest.** Nothing above the base is ever reused. The `RUN apt-get update && apt-get upgrade` added in #28 compounds it: it sits in the final stage and rewrites package metadata and logs on every build.
+
+**The consequence is not the storage bill.** 3 GB of ECR is about thirty cents a month. The consequence is that the retention cap stops being a formality. The lifecycle policy keeps the **100 most recent tagged images**, which under layer sharing would be perhaps 200 MB and under these builds is closer to **2 GB per repository**. More seriously, a cap counted in images rather than bytes evicts oldest-first regardless of what is deployed — so a hundred documentation commits are enough to evict a deployed tag and break the rebuild path, which is the third time this project has run at #4's failure mode from a different direction.
+
+**The generalisable point:** a retention policy expressed in image *count* only behaves as intended if images are cheap. Reproducibility is what makes them cheap, and nothing warns you when it is absent — the build succeeds, the push succeeds, and the only symptom is a repository quietly growing twenty times faster than the mental model predicts.
+
+**What to do, recorded rather than done** — the project is finished and the repositories have been pruned to the three deployed tags. A reproducible build is the real fix: `pip install` with a constraints file into a layer whose mtimes are normalised (`--no-compile`, or `find /opt/venv -exec touch -d @0 {} +` before the copy), so an unchanged `requirements.txt` yields an unchanged digest. Failing that, pin the venv into its own base image rebuilt only when dependencies change, so application commits stop paying for it. Either one would have made a hundred retained images cost what the mental model said they would.
